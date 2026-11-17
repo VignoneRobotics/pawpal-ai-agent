@@ -82,7 +82,8 @@ def main() -> None:
     next_brush = scheduler.mark_task_complete(brush.task_id, today=today)
     repeat_call = scheduler.mark_task_complete(brush.task_id, today=today)
 
-    planned, skipped = scheduler.build_daily_plan(today)
+    plan = scheduler.build_daily_plan(today)
+    planned, skipped = plan.planned, plan.skipped
 
     print("=" * 56)
     print(f"Today's Schedule - {today.isoformat()}")
@@ -131,10 +132,10 @@ def main() -> None:
         print("  (none)")
 
     print("\nWhy:")
-    for line in scheduler.explain_plan(planned, skipped):
+    for line in scheduler.explain_plan(plan):
         print(f"  - {line}")
 
-    used = sum(t.duration_minutes for t in planned)
+    used = plan.minutes_used
     print(f"\nPlanned {used} of {owner.available_minutes} min.")
 
     print("\nNext available slot (today, window 07:00-22:00):")

@@ -174,7 +174,8 @@ if st.button("Generate schedule"):
 
 # Recomputed every run while the flag is set, so the plan reflects new tasks and completions.
 if st.session_state.get("show_plan"):
-    planned, skipped = scheduler.build_daily_plan(date.today())
+    plan = scheduler.build_daily_plan(date.today())
+    planned, skipped = plan.planned, plan.skipped
 
     conflicts = scheduler.detect_conflicts(planned)
     if conflicts:
@@ -202,5 +203,5 @@ if st.session_state.get("show_plan"):
         st.table(task_rows(skipped))
 
     with st.expander("Why this plan?"):
-        for line in scheduler.explain_plan(planned, skipped):
+        for line in scheduler.explain_plan(plan):
             st.write(line)

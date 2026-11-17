@@ -1,9 +1,10 @@
 import json
+from dataclasses import FrozenInstanceError
 from datetime import date, timedelta
 
 import pytest
 
-from pawpal_system import Owner, Pet, Scheduler, Task
+from pawpal_system import Medication, OverlapOverride, Owner, Pet, Scheduler, Task
 
 DAY = date(2026, 1, 5)
 NEXT_DAY = DAY + timedelta(days=1)
@@ -445,6 +446,34 @@ def test_find_conflict_pairs_returns_earlier_task_first():
     assert len(scheduler.detect_conflicts()) == 1
 
 
+# --- Combinable tasks ---
+
+
+def test_two_combinable_overlapping_tasks_are_not_a_conflict():
+    """Overlapping tasks that are both combinable do not conflict."""
+    scheduler, mochi, bean = make_scheduler()
+    add(mochi, "Feed Mochi", "08:00", 15).combinable = True
+    add(bean, "Feed Bean", "08:05", 15).combinable = True
+    assert scheduler.find_conflict_pairs() == []
+    assert scheduler.detect_conflicts() == []
+
+
+def test_one_combinable_task_still_conflicts():
+    """If only one of two overlapping tasks is combinable, it is still a conflict."""
+    scheduler, mochi, bean = make_scheduler()
+    add(mochi, "Feed Mochi", "08:00", 15).combinable = True
+    add(bean, "Vet call", "08:05", 15)
+    assert len(scheduler.detect_conflicts()) == 1
+
+
+def test_combinable_back_to_back_still_no_conflict():
+    """Back-to-back combinable tasks stay conflict-free."""
+    scheduler, mochi, _ = make_scheduler()
+    add(mochi, "Feed", "08:00", 15).combinable = True
+    add(mochi, "Water", "08:15", 15).combinable = True
+    assert scheduler.detect_conflicts() == []
+
+
 # --- Daily plan / budget ---
 
 
@@ -455,9 +484,9 @@ def test_plan_includes_only_pending_tasks_due_that_day():
     add(mochi, "Tomorrow", "09:00", 10, due=NEXT_DAY)
     done = add(mochi, "Done", "10:00", 10, due=DAY)
     done.mark_complete()
-    planned, skipped = scheduler.build_daily_plan(DAY)
-    assert planned == [today]
-    assert skipped == []
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.planned == [today]
+    assert plan.skipped == []
 
 
 def test_plan_selects_by_priority_then_time_within_budget():
@@ -465,9 +494,9 @@ def test_plan_selects_by_priority_then_time_within_budget():
     scheduler, mochi, _ = make_scheduler(budget=30)
     add(mochi, "Early low", "07:00", 30, priority="low")
     high = add(mochi, "Later high", "09:00", 30, priority="high")
-    planned, skipped = scheduler.build_daily_plan(DAY)
-    assert planned == [high]
-    assert [t.description for t in skipped] == ["Early low"]
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.planned == [high]
+    assert [t.description for t in plan.skipped] == ["Early low"]
 
 
 def test_plan_total_never_exceeds_budget():
@@ -475,8 +504,8 @@ def test_plan_total_never_exceeds_budget():
     scheduler, mochi, _ = make_scheduler(budget=50)
     for i, minutes in enumerate([30, 25, 20, 10]):
         add(mochi, f"T{i}", f"{8 + i:02d}:00", minutes)
-    planned, _ = scheduler.build_daily_plan(DAY)
-    assert sum(t.duration_minutes for t in planned) <= 50
+    plan = scheduler.build_daily_plan(DAY)
+    assert sum(t.duration_minutes for t in plan.planned) <= 50
 
 
 def test_plan_skips_oversized_task_and_keeps_going():
@@ -485,43 +514,49 @@ def test_plan_skips_oversized_task_and_keeps_going():
     add(mochi, "First", "08:00", 40, priority="high")
     big = add(mochi, "Too big", "09:00", 40, priority="medium")
     small = add(mochi, "Small", "10:00", 15, priority="low")
-    planned, skipped = scheduler.build_daily_plan(DAY)
-    assert small in planned
-    assert skipped == [big]
+    plan = scheduler.build_daily_plan(DAY)
+    assert small in plan.planned
+    assert plan.skipped == [big]
 
 
 def test_plan_accepts_task_that_exactly_fills_budget():
     """A task whose duration equals the remaining budget is planned."""
     scheduler, mochi, _ = make_scheduler(budget=30)
     task = add(mochi, "Exact", "08:00", 30)
-    planned, skipped = scheduler.build_daily_plan(DAY)
-    assert planned == [task]
-    assert skipped == []
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.planned == [task]
+    assert plan.skipped == []
 
 
 def test_plan_with_zero_budget_skips_everything():
     """A zero-minute budget plans nothing."""
     scheduler, mochi, _ = make_scheduler(budget=0)
     add(mochi, "Walk", "08:00", 10)
-    planned, skipped = scheduler.build_daily_plan(DAY)
-    assert planned == []
-    assert len(skipped) == 1
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.planned == []
+    assert len(plan.skipped) == 1
 
 
-def test_plan_keeps_overlapping_tasks_and_conflicts_warn():
-    """Overlapping tasks are both planned; the conflict is only a warning."""
+def test_plan_skips_later_equal_priority_overlap():
+    """Project 4 change: of two equal-priority overlapping tasks, the later one is skipped with a reason and warning."""
     scheduler, mochi, bean = make_scheduler()
-    add(mochi, "Walk", "08:00", 30)
-    add(bean, "Feed", "08:10", 10)
-    planned, _ = scheduler.build_daily_plan(DAY)
-    assert len(planned) == 2
-    assert len(scheduler.detect_conflicts(planned)) == 1
+    walk = add(mochi, "Walk", "08:00", 30)
+    feed = add(bean, "Feed", "08:10", 10)
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.planned == [walk]
+    assert plan.skipped == [feed]
+    assert plan.reasons[feed.task_id] == "skipped: overlaps Walk"
+    assert plan.warnings == [
+        "Skipped (overlap): Feed 08:10-08:20 overlaps Walk 08:00-08:30 (planned first by priority/time)"
+    ]
+    assert scheduler.detect_conflicts(plan.planned) == []
 
 
 def test_plan_with_no_tasks_is_empty():
     """An owner with no tasks gets an empty plan."""
     scheduler, _, _ = make_scheduler()
-    assert scheduler.build_daily_plan(DAY) == ([], [])
+    plan = scheduler.build_daily_plan(DAY)
+    assert (plan.planned, plan.skipped) == ([], [])
 
 
 # --- explain_plan ---
@@ -530,7 +565,7 @@ def test_plan_with_no_tasks_is_empty():
 def test_explain_plan_with_nothing_due():
     """With no planned or skipped tasks the explanation says nothing is due."""
     scheduler, _, _ = make_scheduler()
-    assert scheduler.explain_plan([], []) == ["No tasks due."]
+    assert scheduler.explain_plan(scheduler.build_daily_plan(DAY)) == ["No tasks due."]
 
 
 def test_explain_plan_has_one_line_per_task_and_mentions_budget():
@@ -538,8 +573,8 @@ def test_explain_plan_has_one_line_per_task_and_mentions_budget():
     scheduler, mochi, _ = make_scheduler(budget=30)
     add(mochi, "Fits", "08:00", 30, priority="high")
     add(mochi, "Too long", "09:00", 20, priority="low")
-    planned, skipped = scheduler.build_daily_plan(DAY)
-    lines = scheduler.explain_plan(planned, skipped)
+    plan = scheduler.build_daily_plan(DAY)
+    lines = scheduler.explain_plan(plan)
     assert len(lines) == 2
     assert lines[0].startswith("Planned: Fits")
     assert lines[1].startswith("Skipped: Too long")
@@ -680,3 +715,431 @@ def test_next_slot_rejects_non_positive_duration():
     scheduler, _, _ = make_scheduler()
     with pytest.raises(ValueError):
         scheduler.next_available_slot(0, DAY)
+
+
+# --- Availability windows ---
+
+
+@pytest.mark.parametrize(
+    "bad_windows",
+    [["8:00-10:00"], ["08:00-25:00"], ["10:00-09:00"], ["09:00-09:00"], ["08:00-10:00", "09:30-11:00"], ["junk"]],
+)
+def test_owner_rejects_bad_availability_windows(bad_windows):
+    """Malformed, reversed, empty, or overlapping windows raise ValueError."""
+    with pytest.raises(ValueError, match="indow"):
+        Owner("Jordan", availability_windows=bad_windows)
+
+
+def test_owner_accepts_window_ending_at_midnight():
+    """A window may end at 24:00, and windows are returned sorted."""
+    owner = Owner("Jordan", availability_windows=["20:00-24:00", "06:00-08:00"])
+    assert owner.window_ranges() == [(360, 480), (1200, 1440)]
+
+
+def test_no_windows_means_available_all_day():
+    """An owner without windows is available 00:00-24:00."""
+    assert Owner("Jordan").window_ranges() == [(0, 24 * 60)]
+
+
+def test_next_slot_skips_time_outside_owner_windows():
+    """With the morning window full, the slot moves to the evening window."""
+    scheduler, mochi, _ = make_scheduler()
+    scheduler.owner.availability_windows = ["08:00-10:00", "17:00-20:00"]
+    add(mochi, "Morning block", "08:00", 120)
+    assert scheduler.next_available_slot(30, DAY) == "17:00"
+
+
+def test_next_slot_uses_intersection_of_window_params_and_owner_windows():
+    """The search is limited to both the window_start/window_end range and the owner's windows."""
+    scheduler, _, _ = make_scheduler()
+    scheduler.owner.availability_windows = ["06:00-09:00", "18:00-21:00"]
+    assert scheduler.next_available_slot(30, DAY) == "07:00"  # default window_start 07:00
+    assert scheduler.next_available_slot(30, DAY, window_start="10:00") == "18:00"
+    assert scheduler.next_available_slot(30, DAY, window_start="20:45") is None
+
+
+def test_next_slot_returns_none_when_no_owner_window_has_room():
+    """A task longer than every owner window gets no slot."""
+    scheduler, _, _ = make_scheduler()
+    scheduler.owner.availability_windows = ["08:00-08:30", "12:00-12:45"]
+    assert scheduler.next_available_slot(45, DAY) == "12:00"
+    assert scheduler.next_available_slot(60, DAY) is None
+
+
+# --- Overlap-aware daily plan ---
+
+
+def test_plan_skips_lower_priority_overlap_even_if_it_starts_first():
+    """The high-priority task is planned; the overlapping low-priority one is skipped with a reason."""
+    scheduler, mochi, _ = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30, priority="high")
+    bath = add(mochi, "Bath", "07:50", 30, priority="low")
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.planned == [walk]
+    assert plan.skipped == [bath]
+    assert plan.reasons == {walk.task_id: "planned", bath.task_id: "skipped: overlaps Walk"}
+    assert len(plan.warnings) == 1
+
+
+def test_plan_combinable_overlap_both_planned_minutes_counted_once():
+    """Two combinable overlapping tasks are both planned; shared minutes count once."""
+    scheduler, mochi, bean = make_scheduler(budget=20)
+    feed_m = add(mochi, "Feed Mochi", "08:00", 15)
+    feed_b = add(bean, "Feed Bean", "08:05", 15)
+    feed_m.combinable = feed_b.combinable = True
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.planned == [feed_m, feed_b]
+    assert plan.minutes_used == 20  # 08:00-08:20, not 30
+    assert plan.warnings == []
+
+
+def test_plan_three_way_combinable_overlap_counted_once():
+    """Three mutually overlapping combinable tasks use only the minutes of their union."""
+    scheduler, mochi, _ = make_scheduler()
+    for name, time in [("A", "08:00"), ("B", "08:10"), ("C", "08:20")]:
+        add(mochi, name, time, 30).combinable = True
+    plan = scheduler.build_daily_plan(DAY)
+    assert len(plan.planned) == 3
+    assert plan.minutes_used == 50  # 08:00-08:50
+
+
+def test_plan_one_combinable_task_still_skips_overlap():
+    """If only one of two overlapping tasks is combinable, the later one is still skipped."""
+    scheduler, mochi, bean = make_scheduler()
+    add(mochi, "Walk", "08:00", 30)
+    feed = add(bean, "Feed", "08:10", 10)
+    feed.combinable = True
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.skipped == [feed]
+
+
+def test_plan_skips_tasks_outside_windows_without_using_budget():
+    """Tasks not fully inside an availability window are skipped and use no budget."""
+    scheduler, mochi, _ = make_scheduler(budget=30)
+    scheduler.owner.availability_windows = ["08:00-12:00"]
+    early = add(mochi, "Early", "06:00", 30, priority="high")
+    straddle = add(mochi, "Straddle", "11:45", 30, priority="high")
+    walk = add(mochi, "Walk", "09:00", 30, priority="low")
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.planned == [walk]
+    assert plan.reasons[early.task_id] == "skipped: outside windows"
+    assert plan.reasons[straddle.task_id] == "skipped: outside windows"
+    assert plan.minutes_used == 30
+
+
+def test_plan_gives_every_task_a_reason_of_each_kind():
+    """One plan can hold planned, budget, overlap, and window reasons; every task has one."""
+    scheduler, mochi, bean = make_scheduler(budget=40)
+    scheduler.owner.availability_windows = ["07:00-20:00"]
+    walk = add(mochi, "Walk", "08:00", 30, priority="high")
+    bath = add(mochi, "Bath", "08:15", 20, priority="medium")
+    groom = add(bean, "Groom", "10:00", 30, priority="low")
+    night = add(bean, "Night feed", "21:00", 10, priority="low")
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.reasons == {
+        walk.task_id: "planned",
+        bath.task_id: "skipped: overlaps Walk",
+        groom.task_id: "skipped: budget",
+        night.task_id: "skipped: outside windows",
+    }
+    assert set(plan.reasons) == {t.task_id for t in plan.planned + plan.skipped}
+
+
+# --- "Do both" overlap overrides ---
+
+
+def test_allowed_overlap_is_planned_with_reason_warning_and_full_minutes():
+    """An owner-allowed overlapping pair is planned; minutes count in full and a warning remains."""
+    scheduler, mochi, bean = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30)
+    feed = add(bean, "Feed", "08:10", 10)
+    scheduler.owner.allow_overlap(walk.task_id, feed.task_id, DAY)
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.planned == [walk, feed]
+    assert plan.reasons[feed.task_id] == "planned: overlap allowed by owner"
+    assert plan.minutes_used == 40
+    assert plan.warnings == [
+        "Conflict (cross-pet: Mochi, Bean): Walk 08:00-08:30 overlaps Feed 08:10-08:20 (allowed by owner)"
+    ]
+
+
+def test_allow_overlap_is_order_insensitive_and_not_duplicated():
+    """The override pair is normalized, so either order matches and adding twice stores one entry."""
+    scheduler, mochi, bean = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30)
+    feed = add(bean, "Feed", "08:10", 10)
+    scheduler.owner.allow_overlap(feed.task_id, walk.task_id, DAY)
+    scheduler.owner.allow_overlap(walk.task_id, feed.task_id, DAY)
+    assert scheduler.owner.is_overlap_allowed(walk.task_id, feed.task_id, DAY)
+    assert len(scheduler.owner.overlap_overrides) == 1
+    override = scheduler.owner.overlap_overrides[0]
+    assert override.task_a < override.task_b
+
+
+def test_override_for_another_date_is_ignored():
+    """An override recorded for a different day does not allow the overlap today."""
+    scheduler, mochi, bean = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30)
+    feed = add(bean, "Feed", "08:10", 10)
+    a, b = sorted((walk.task_id, feed.task_id))
+    scheduler.owner.overlap_overrides.append(OverlapOverride(a, b, NEXT_DAY))
+    plan = scheduler.build_daily_plan(DAY)
+    assert plan.skipped == [feed]
+
+
+def test_override_does_not_carry_to_next_recurring_copy():
+    """Recurring copies get new task ids and dates, so yesterday's override no longer applies."""
+    scheduler, mochi, bean = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30, frequency="daily")
+    feed = add(bean, "Feed", "08:10", 10, frequency="daily")
+    scheduler.owner.allow_overlap(walk.task_id, feed.task_id, DAY)
+    assert len(scheduler.build_daily_plan(DAY).planned) == 2
+
+    scheduler.mark_task_complete(walk.task_id)
+    next_feed = scheduler.mark_task_complete(feed.task_id)
+    plan = scheduler.build_daily_plan(NEXT_DAY)
+    assert plan.skipped == [next_feed]
+    assert plan.reasons[next_feed.task_id] == "skipped: overlaps Walk"
+
+
+def test_allow_overlap_rejects_unknown_same_or_wrong_day():
+    """allow_overlap raises ValueError for an unknown id, the same id twice, or a task not due that day."""
+    scheduler, mochi, bean = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30)
+    feed = add(bean, "Feed", "08:10", 10)
+    with pytest.raises(ValueError):
+        scheduler.owner.allow_overlap(walk.task_id, "missing", DAY)
+    with pytest.raises(ValueError):
+        scheduler.owner.allow_overlap(walk.task_id, walk.task_id, DAY)
+    with pytest.raises(ValueError):
+        scheduler.owner.allow_overlap(walk.task_id, feed.task_id, NEXT_DAY)
+    assert scheduler.owner.overlap_overrides == []
+
+
+def test_windows_and_overrides_round_trip_through_json(tmp_path):
+    """Availability windows and overlap overrides survive save and load."""
+    scheduler, mochi, bean = make_scheduler()
+    scheduler.owner.availability_windows = ["07:00-12:00", "17:00-21:00"]
+    walk = add(mochi, "Walk", "08:00", 30)
+    feed = add(bean, "Feed", "08:10", 10)
+    scheduler.owner.allow_overlap(walk.task_id, feed.task_id, DAY)
+    path = tmp_path / "data.json"
+    scheduler.owner.save_to_json(path)
+
+    loaded = Owner.load_from_json(path)
+    assert loaded == scheduler.owner
+    assert loaded.overlap_overrides[0].day == DAY
+    stored = json.loads(path.read_text(encoding="utf-8"))["overlap_overrides"][0]
+    assert stored["day"] == DAY.isoformat()
+    assert set(stored) == {"task_a", "task_b", "day"}
+
+
+def test_old_json_without_new_keys_still_loads(tmp_path):
+    """A Module 2 data file (no windows, overrides, combinable, or medication) still loads with defaults."""
+    _, path = saved_owner(tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for key in ("availability_windows", "overlap_overrides"):
+        data.pop(key)
+    for pet in data["pets"]:
+        for task in pet["tasks"]:
+            task.pop("combinable")
+            task.pop("medication", None)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    loaded = Owner.load_from_json(path)
+    assert loaded.availability_windows == []
+    assert loaded.overlap_overrides == []
+    assert all(t.combinable is False for t in loaded.get_all_tasks())
+
+
+def test_explain_plan_has_a_line_for_each_reason_type():
+    """explain_plan words each reason: planned, allowed overlap, budget, overlap, and windows."""
+    scheduler, mochi, bean = make_scheduler(budget=50)
+    scheduler.owner.availability_windows = ["07:00-20:00"]
+    walk = add(mochi, "Walk", "08:00", 30, priority="high")
+    feed = add(bean, "Feed", "08:10", 10, priority="high")
+    add(mochi, "Bath", "08:15", 20, priority="medium")
+    add(bean, "Groom", "10:00", 30, priority="low")
+    add(bean, "Night feed", "21:00", 10, priority="low")
+    scheduler.owner.allow_overlap(walk.task_id, feed.task_id, DAY)
+    lines = scheduler.explain_plan(scheduler.build_daily_plan(DAY))
+    assert lines == [
+        "Planned: Walk (Mochi) at 08:00, 30 min, high priority - fits in the 50-minute budget.",
+        "Planned: Feed (Bean) at 08:10, 10 min, high priority - overlap with Walk allowed by owner.",
+        "Skipped: Bath (Mochi) at 08:15 - overlaps Walk, which was planned first.",
+        "Skipped: Groom (Bean) at 10:00 needs 30 min; did not fit in the 50-minute budget (planned tasks use 40).",
+        "Skipped: Night feed (Bean) at 21:00 - outside the owner's availability windows (07:00-20:00).",
+    ]
+
+
+# --- Overdue tasks ---
+
+
+def test_overdue_tasks_returns_only_past_pending_tasks_oldest_first():
+    """Pending tasks due before today are overdue; today, future, and completed tasks are not."""
+    scheduler, mochi, bean = make_scheduler()
+    today = DAY + timedelta(days=3)
+    newer = add(mochi, "Newer", "07:00", 10, due=DAY + timedelta(days=2))
+    older = add(bean, "Older", "09:00", 10, due=DAY)
+    add(mochi, "Due today", "08:00", 10, due=today)
+    add(mochi, "Future", "08:00", 10, due=today + timedelta(days=1))
+    add(bean, "Done", "08:00", 10, due=DAY).mark_complete()
+    assert scheduler.overdue_tasks(today) == [older, newer]
+
+
+def test_overdue_tasks_composes_with_filter():
+    """overdue_tasks accepts a filtered task list."""
+    scheduler, mochi, bean = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 10, due=DAY)
+    add(bean, "Feed", "08:00", 10, due=DAY)
+    assert scheduler.overdue_tasks(NEXT_DAY, scheduler.filter_tasks(pet_name="Mochi")) == [walk]
+
+
+# --- move_task ---
+
+
+def test_move_task_changes_time_and_keeps_same_task():
+    """Moving a task updates its time in place; id, pet, and other fields are unchanged."""
+    scheduler, mochi, _ = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30, priority="high")
+    moved = scheduler.move_task(walk.task_id, "09:15")
+    assert moved is walk
+    assert (walk.time, walk.due_date, walk.pet_name, walk.priority) == ("09:15", DAY, "Mochi", "high")
+    assert mochi.get_tasks() == [walk]
+
+
+def test_move_task_changes_time_and_date():
+    """A new date moves the task to that day."""
+    scheduler, mochi, _ = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30)
+    scheduler.move_task(walk.task_id, "07:00", NEXT_DAY)
+    assert (walk.time, walk.due_date) == ("07:00", NEXT_DAY)
+
+
+@pytest.mark.parametrize("bad_time", ["7:00", "24:00", "23:45", None])
+def test_move_task_rejects_invalid_time_and_leaves_task_unchanged(bad_time):
+    """A bad format, out-of-range time, or a move past midnight raises ValueError; the task is untouched."""
+    scheduler, mochi, _ = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30)
+    with pytest.raises(ValueError):
+        scheduler.move_task(walk.task_id, bad_time, NEXT_DAY)
+    assert (walk.time, walk.due_date) == ("08:00", DAY)
+
+
+def test_move_task_rejects_unknown_id():
+    """An unknown task id raises ValueError."""
+    scheduler, _, _ = make_scheduler()
+    with pytest.raises(ValueError, match="Unknown"):
+        scheduler.move_task("missing", "09:00")
+
+
+def test_move_task_rejects_completed_task():
+    """Completed tasks are history and cannot be moved."""
+    scheduler, mochi, _ = make_scheduler()
+    walk = add(mochi, "Walk", "08:00", 30)
+    walk.mark_complete()
+    with pytest.raises(ValueError, match="completed"):
+        scheduler.move_task(walk.task_id, "09:00")
+    assert walk.time == "08:00"
+
+
+# --- Medication ---
+
+
+def make_med(**overrides) -> Medication:
+    """Return a valid twice-daily Medication, with any fields overridden."""
+    values = {"drug": "Carprofen", "dose_text": "25 mg tablet", "times": ("08:00", "20:00"), "attested": True}
+    values.update(overrides)
+    return Medication(**values)
+
+
+def test_medication_builds_with_valid_values():
+    """A valid medication keeps its prescribed times as a tuple."""
+    med = make_med(vet_name="Dr. Lee", vet_phone="555-0100", vet_consent=True)
+    assert med.times == ("08:00", "20:00")
+    assert med.label_verified is False
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"drug": "  "},
+        {"dose_text": ""},
+        {"times": ()},
+        {"times": ("8:00",)},
+        {"times": ("08:00", "08:00")},
+        {"times": ["08:00"]},  # must be a tuple
+    ],
+)
+def test_medication_rejects_bad_values(overrides):
+    """Empty drug or dose, missing, malformed, duplicate, or non-tuple times raise ValueError."""
+    with pytest.raises(ValueError):
+        make_med(**overrides)
+
+
+def test_medication_rejects_vet_details_without_consent():
+    """Vet contact info cannot be stored unless vet_consent is True."""
+    with pytest.raises(ValueError, match="consent"):
+        make_med(vet_phone="555-0100")
+
+
+def test_medication_dose_cannot_be_changed_in_place():
+    """Medication is frozen, so dose_text cannot be reassigned."""
+    med = make_med()
+    with pytest.raises(FrozenInstanceError):
+        med.dose_text = "50 mg"
+
+
+def test_medication_dose_tasks_share_one_medication():
+    """Each prescribed time is its own task; doses share the same Medication object."""
+    _, mochi, _ = make_scheduler()
+    med = make_med()
+    morning = Task.medication_dose(med, "08:00", 5, DAY)
+    evening = Task.medication_dose(med, "20:00", 5, DAY)
+    mochi.add_task(morning)
+    mochi.add_task(evening)
+    assert morning.medication is evening.medication is med
+    assert (morning.description, morning.priority, morning.frequency) == ("Carprofen", "high", "daily")
+
+
+def test_medication_dose_rejects_non_prescribed_time():
+    """Creating a dose at a time not in medication.times raises ValueError."""
+    with pytest.raises(ValueError, match="prescribed"):
+        Task.medication_dose(make_med(), "09:00", 5, DAY)
+
+
+def test_moving_a_dose_off_prescribed_time_is_allowed_in_phase_1():
+    """move_task does not check prescribed times; the Phase 2 verifier will enforce a tolerance."""
+    scheduler, mochi, _ = make_scheduler()
+    dose = Task.medication_dose(make_med(), "08:00", 5, DAY)
+    mochi.add_task(dose)
+    scheduler.move_task(dose.task_id, "08:30")
+    assert dose.time == "08:30"
+    assert dose.medication.times == ("08:00", "20:00")
+
+
+def test_recurring_dose_keeps_its_medication():
+    """Completing a daily dose creates a copy with the same Medication."""
+    scheduler, mochi, _ = make_scheduler()
+    med = make_med()
+    dose = Task.medication_dose(med, "08:00", 5, DAY)
+    mochi.add_task(dose)
+    next_dose = scheduler.mark_task_complete(dose.task_id)
+    assert next_dose.medication is med
+    assert next_dose.due_date == NEXT_DAY
+
+
+def test_medication_round_trips_through_json(tmp_path):
+    """A task's medication survives save and load; tasks without one load as None."""
+    scheduler, mochi, bean = make_scheduler()
+    med = make_med(vet_clinic="Oak Vet", vet_consent=True, label_verified=True)
+    mochi.add_task(Task.medication_dose(med, "20:00", 5, DAY))
+    add(bean, "Feed", "09:00", 10)
+    path = tmp_path / "data.json"
+    scheduler.owner.save_to_json(path)
+
+    loaded = Owner.load_from_json(path)
+    assert loaded == scheduler.owner
+    dose, feed = loaded.get_all_tasks()
+    assert dose.medication == med
+    assert isinstance(dose.medication.times, tuple)
+    assert feed.medication is None

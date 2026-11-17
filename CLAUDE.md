@@ -91,7 +91,8 @@ Planned modules (names may be adjusted in each phase's plan):
 
 ## Project 4 phase plan
 0. **Setup** — new repo, venv, assets/ ✅
-1. **Scheduler upgrades (deterministic)** — overlap-aware daily plan: when two tasks overlap, the lower-priority one is moved to `skipped` with reason "overlaps X" and a warning; **never dropped silently**. Owner can override with "do both" (logged). New `Task.combinable: bool = False`; two overlapping tasks are NOT a conflict if both are combinable, and their overlapping minutes count once against the budget. `build_daily_plan` returns per-task reasons (reverses the Module 2 "explain_plan recomputes" decision). Owner availability windows (list of "HH:MM-HH:MM") used by both the plan and `next_available_slot`. `overdue_tasks(today)`. `move_task(task_id, new_time, new_date=None)` with full validation. `Medication` data on `Task` (dose read-only to agent). Tests for each.2. **Agent core (offline)** — `LLMClient`/`FakeLLM`, tools, proposal schema, verifier, retry loop, input guard, traces. Tests with FakeLLM only.
+1. **Scheduler upgrades (deterministic)** — overlap-aware daily plan: when two tasks overlap, the lower-priority one is moved to `skipped` with reason "overlaps X" and a warning; **never dropped silently**. Owner can override with "do both" (logged). New `Task.combinable: bool = False`; two overlapping tasks are NOT a conflict if both are combinable, and their overlapping minutes count once against the budget. `build_daily_plan` returns per-task reasons (reverses the Module 2 "explain_plan recomputes" decision). Owner availability windows (list of "HH:MM-HH:MM") used by both the plan and `next_available_slot`. `overdue_tasks(today)`. `move_task(task_id, new_time, new_date=None)` with full validation. `Medication` data on `Task` (dose read-only to agent). Tests for each. ✅
+2. **Agent core (offline)** — `LLMClient`/`FakeLLM`, tools, proposal schema, verifier, retry loop, input guard, traces. Tests with FakeLLM only.
 3. **Real Haiku wiring + CLI** — `AnthropicClient`, `.env`/`.env.example`, `agent_demo.py` with 3 sample requests; save outputs for README.
 4. **Streamlit integration** — chat box, proposal preview (before/after), Approve/Reject, confidence + rationale shown, overdue view.
 5. **Medication flow** — form with re-type + attestation + vet consent; optional label cross-check, hashing, verification log; fake `SAMPLE` label in `assets/`.
@@ -100,7 +101,12 @@ Planned modules (names may be adjusted in each phase's plan):
 8. *(Optional)* **RAG** — pet-care guideline lookup tool; only if time remains.
 
 ## Change log (Project 4 — facts for model_card.md)
-- (add entries as decisions/AI suggestions are accepted or rejected)
+- Phase 1: accepted returning a DailyPlan dataclass (planned, skipped, reasons, warnings, minutes_used) from build_daily_plan; explain_plan(plan) reads stored reasons (reverses Module 2 "recompute"). Minimal call-site fix in main.py/app.py.
+- Phase 1: Kyle revised the AI's "do both" design from a function parameter to persisted Owner.overlap_overrides (OverlapOverride dataclass, per task_id + date, so recurring copies don't inherit it); then revised tuples -> dataclass for self-describing JSON.
+- Phase 1: accepted the AI suggestion to make Medication frozen (dose_text cannot be mutated in place) and to add vet_consent validation.
+- Phase 1: AI moved the prescribed-time check into a Task.medication_dose factory because Task.__post_init__ also runs on replace() and on load, which would have blocked moving, recurring, and reloading doses. The Phase 2 verifier will enforce a +/-60 min tolerance.
+- Phase 1: Kyle revised the plan so Medication.times = vet's prescribed times (immutable) and each dose is its own Task; Phase 2 verifier enforces ±60 min tolerance.
+- Phase 1: known gap — Task(medication=...) built directly bypasses the medication_dose factory; mitigated because the agent has no med-creation tool.
 
 ---
 
