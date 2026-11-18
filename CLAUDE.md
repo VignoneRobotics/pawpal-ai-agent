@@ -92,7 +92,7 @@ Planned modules (names may be adjusted in each phase's plan):
 ## Project 4 phase plan
 0. **Setup** — new repo, venv, assets/ ✅
 1. **Scheduler upgrades (deterministic)** — overlap-aware daily plan: when two tasks overlap, the lower-priority one is moved to `skipped` with reason "overlaps X" and a warning; **never dropped silently**. Owner can override with "do both" (logged). New `Task.combinable: bool = False`; two overlapping tasks are NOT a conflict if both are combinable, and their overlapping minutes count once against the budget. `build_daily_plan` returns per-task reasons (reverses the Module 2 "explain_plan recomputes" decision). Owner availability windows (list of "HH:MM-HH:MM") used by both the plan and `next_available_slot`. `overdue_tasks(today)`. `move_task(task_id, new_time, new_date=None)` with full validation. `Medication` data on `Task` (dose read-only to agent). Tests for each. ✅
-2. **Agent core (offline)** — `LLMClient`/`FakeLLM`, tools, proposal schema, verifier, retry loop, input guard, traces. Tests with FakeLLM only.
+2. **Agent core (offline)** — `LLMClient`/`FakeLLM`, tools, proposal schema, verifier, retry loop, input guard, traces. Tests with FakeLLM only. ✅
 3. **Real Haiku wiring + CLI** — `AnthropicClient`, `.env`/`.env.example`, `agent_demo.py` with 3 sample requests; save outputs for README.
 4. **Streamlit integration** — chat box, proposal preview (before/after), Approve/Reject, confidence + rationale shown, overdue view.
 5. **Medication flow** — form with re-type + attestation + vet consent; optional label cross-check, hashing, verification log; fake `SAMPLE` label in `assets/`.
@@ -107,6 +107,11 @@ Planned modules (names may be adjusted in each phase's plan):
 - Phase 1: AI moved the prescribed-time check into a Task.medication_dose factory because Task.__post_init__ also runs on replace() and on load, which would have blocked moving, recurring, and reloading doses. The Phase 2 verifier will enforce a +/-60 min tolerance.
 - Phase 1: Kyle revised the plan so Medication.times = vet's prescribed times (immutable) and each dose is its own Task; Phase 2 verifier enforces ±60 min tolerance.
 - Phase 1: known gap — Task(medication=...) built directly bypasses the medication_dose factory; mitigated because the agent has no med-creation tool.
+- Phase 2: accepted AI deviations: (1) changes are recorded from propose_* tool calls (one source of truth), final JSON carries only summary/confidence/notes/refusal; (2) schema in pawpal_agent/proposal.py, not agent.py; (3) 6 tool turns per attempt, max 3 attempts; (4) tools validate structure only, all policy lives in the verifier; (5) medication doses cannot change date via the agent; (6) a task added in the same proposal cannot also be moved.
+- Phase 2: Kyle added three safety revisions to the AI's plan: an output guard that redacts dosing text in the model's summary/notes; verifier rejects AddChange descriptions that look like medication ("medication tasks must be created via the medication form"); input guard lets "move the 25 mg dose" through when a scheduling verb is present and no dose-intent word.
+- Phase 2: AI design choice: the ±60 min dose tolerance is anchored to the prescribed time nearest the dose's original time, so an 08:00 dose cannot slide to 19:30 (near the 20:00 slot).
+- Phase 2: agent mistake caught by tests: the "add over budget" test first used a medium-priority add, which outranked low-priority Play and displaced it instead of being skipped; fixed the test setup (verifier behavior was correct).
+- Phase 2: known limitation: input/output guards are keyword/regex based (e.g. the scheduling question "Can I give Mochi's pill at 9 instead?" is refused as dosing because "can I give" + "pill" matches; unknown drug names are only recognized if they exist in the owner's medication tasks).
 
 ---
 

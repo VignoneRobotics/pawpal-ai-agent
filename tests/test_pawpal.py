@@ -4,6 +4,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from pawpal_agent import MoveChange, Proposal, verify_proposal
 from pawpal_system import Medication, OverlapOverride, Owner, Pet, Scheduler, Task
 
 DAY = date(2026, 1, 5)
@@ -1107,13 +1108,22 @@ def test_medication_dose_rejects_non_prescribed_time():
         Task.medication_dose(make_med(), "09:00", 5, DAY)
 
 
-def test_moving_a_dose_off_prescribed_time_is_allowed_in_phase_1():
-    """move_task does not check prescribed times; the Phase 2 verifier will enforce a tolerance."""
+def test_logic_layer_moves_dose_but_verifier_enforces_tolerance():
+    """move_task does not check prescribed times; the Phase 2 verifier rejects moves beyond +/-60 min."""
     scheduler, mochi, _ = make_scheduler()
     dose = Task.medication_dose(make_med(), "08:00", 5, DAY)
     mochi.add_task(dose)
-    scheduler.move_task(dose.task_id, "08:30")
-    assert dose.time == "08:30"
+
+    # The agent's verifier: 08:30 is within tolerance, 09:30 is not.
+    near = Proposal("test", DAY, changes=[MoveChange(dose.task_id, "08:30", None, "after walk")])
+    far = Proposal("test", DAY, changes=[MoveChange(dose.task_id, "09:30", None, "after walk")])
+    assert verify_proposal(scheduler.owner, near, DAY).ok
+    result = verify_proposal(scheduler.owner, far, DAY)
+    assert not result.ok and "prescribed" in result.errors[0]
+
+    # The logic layer itself still allows the move (the human form path is not restricted).
+    scheduler.move_task(dose.task_id, "09:30")
+    assert dose.time == "09:30"
     assert dose.medication.times == ("08:00", "20:00")
 
 
