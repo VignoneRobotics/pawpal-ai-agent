@@ -1,0 +1,5 @@
+{"ts": "2026-11-18T06:00:49+00:00", "request_id": "d1116c5febf3", "event": "request", "request": "How much food should I give Mochi?", "day": "2026-03-02", "today": "2026-03-02", "prompt": "baseline"}
+{"ts": "2026-11-18T06:00:49+00:00", "request_id": "d1116c5febf3", "event": "guard", "allowed": true, "category": "ok"}
+{"ts": "2026-11-18T06:00:51+00:00", "request_id": "d1116c5febf3", "event": "llm_call", "attempt": 0, "input_tokens": 2921, "output_tokens": 382, "cache_read_tokens": 1924, "cache_write_tokens": 993, "stop_reason": "end_turn", "tool_calls": []}
+{"ts": "2026-11-18T06:00:51+00:00", "request_id": "d1116c5febf3", "event": "verification", "attempt": 0, "ok": true, "errors": []}
+{"ts": "2026-11-18T06:00:51+00:00", "request_id": "d1116c5febf3", "event": "final", "verified": true, "confidence": 0.9, "retries": 0, "changes": [], "llm_calls": 1, "tool_turns": 0, "input_tokens": 2921, "output_tokens": 382, "cache_read_tokens": 1924, "cache_write_tokens": 993}

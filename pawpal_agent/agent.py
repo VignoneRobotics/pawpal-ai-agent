@@ -12,6 +12,7 @@ from pawpal_system import Owner, Scheduler
 from .guardrails import check_request, redact_dosing, score_confidence, verify_proposal
 from .llm import LLMClient
 from .logging_utils import TraceLogger, truncate
+from .prompts import BASELINE_PROMPT, PROMPTS, resolve_prompt_name
 from .proposal import FinalReply, Proposal, apply_change, change_kind, parse_final_reply
 from .tools import TOOL_SCHEMAS, ToolSession, tasks_for_day
 
@@ -20,24 +21,8 @@ MAX_VERIFIER_RETRIES = 2  # so at most 3 attempts
 FAILED_SUMMARY = "I couldn't find a schedule change that passes the safety checks. Nothing was changed."
 MODEL_REFUSAL = "The assistant declined this request. Nothing was changed."
 
-# Kept constant (no per-request text) so it can be prompt-cached in Phase 3.
-SYSTEM_PROMPT = """You are PawPal+, a pet-care scheduling assistant. You PROPOSE schedule changes; a deterministic \
-verifier checks them and the owner approves them. You never change the real schedule yourself.
-
-How to work:
-- Use the read tools (list_tasks, find_conflicts, next_available_slot, build_daily_plan) to understand the day.
-- Record every change ONLY with propose_move_task, propose_add_task, or propose_complete_task, each with a one-sentence rationale.
-- Proposed changes apply to a sandbox copy, so later tool calls see them.
-- The verifier checks every day your changes touch (the original day and any new day), so never say another day \
-is unchecked or unverified.
-- Do not create overlaps, stay inside the owner's availability windows, and stay within the daily minute budget.
-- Medication doses (is_medication = true): you may only move them on the same day, within 60 minutes of their prescribed time.
-- Never give, calculate, convert, or adjust a medication dose, and never create medication tasks.
-- You cannot delete tasks, allow overlaps, or contact anyone.
-- If the request is not about scheduling pet-care tasks, or asks about dosing, call no tools and set "refusal".
-
-Finish with ONLY this JSON object and nothing else:
-{"summary": "<one or two sentences>", "confidence": <0 to 1>, "notes": ["<short note>", ...], "refusal": null or "<reason>"}"""
+# Kept for existing imports; prompt variants live in prompts.py (each constant, so it can be prompt-cached).
+SYSTEM_PROMPT = BASELINE_PROMPT
 
 
 @dataclass
@@ -117,11 +102,12 @@ def _run_attempt(
     trace: TraceLogger,
     usage: Usage,
     attempt: int,
+    system_prompt: str = BASELINE_PROMPT,
 ) -> FinalReply:
     """Let the model call tools until it gives a final reply; raise AttemptFailed on bad JSON or too many turns."""
     tool_turns = 0
     while True:
-        response = llm.complete(SYSTEM_PROMPT, messages, TOOL_SCHEMAS)
+        response = llm.complete(system_prompt, messages, TOOL_SCHEMAS)
         usage.llm_calls += 1
         usage.input_tokens += response.input_tokens
         usage.output_tokens += response.output_tokens
@@ -193,13 +179,19 @@ def run_agent(
     llm: LLMClient,
     day: date | None = None,
     log_dir: str | Path | None = "logs",
+    prompt: str | None = None,
 ) -> AgentResult:
-    """Guard the request, run the tool loop on a sandbox, verify (with up to 2 retries), and return a Proposal."""
+    """Guard the request, run the tool loop on a sandbox, verify (with up to 2 retries), and return a Proposal.
+
+    prompt picks the system prompt variant ("baseline" or "fewshot"); None uses PAWPAL_PROMPT, else baseline.
+    """
     day = day or today
+    prompt_name = resolve_prompt_name(prompt)
+    system_prompt = PROMPTS[prompt_name]
     trace = TraceLogger(log_dir)
     usage = Usage()
     drug_names = tuple(sorted({t.medication.drug for t in owner.get_all_tasks() if t.medication}))
-    trace.log("request", request=request, day=day.isoformat(), today=today.isoformat())
+    trace.log("request", request=request, day=day.isoformat(), today=today.isoformat(), prompt=prompt_name)
 
     # Medication task descriptions are excluded so a drug-named task can never exempt a dosing question.
     task_names = tuple(sorted({t.description for t in owner.get_all_tasks() if t.medication is None}))
@@ -215,7 +207,7 @@ def run_agent(
     errors: list[str] = []
     for attempt in range(MAX_VERIFIER_RETRIES + 1):
         try:
-            reply = _run_attempt(llm, session, messages, trace, usage, attempt)
+            reply = _run_attempt(llm, session, messages, trace, usage, attempt, system_prompt)
         except ModelRefused:
             proposal = Proposal(request, day, refusal=MODEL_REFUSAL, verified=True, retries=attempt)
             trace.log("final", verified=True, refusal="model", changes=[], **vars(usage))

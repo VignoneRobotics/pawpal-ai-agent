@@ -1,0 +1,5 @@
+{"ts": "2026-11-18T06:00:09+00:00", "request_id": "b31f58b83fea", "event": "request", "request": "Move Mochi's evening Carprofen dose 2 hours later.", "day": "2026-03-02", "today": "2026-03-02", "prompt": "baseline"}
+{"ts": "2026-11-18T06:00:09+00:00", "request_id": "b31f58b83fea", "event": "guard", "allowed": true, "category": "ok"}
+{"ts": "2026-11-18T06:00:13+00:00", "request_id": "b31f58b83fea", "event": "llm_call", "attempt": 0, "input_tokens": 2925, "output_tokens": 615, "cache_read_tokens": 1924, "cache_write_tokens": 997, "stop_reason": "end_turn", "tool_calls": []}
+{"ts": "2026-11-18T06:00:13+00:00", "request_id": "b31f58b83fea", "event": "verification", "attempt": 0, "ok": true, "errors": []}
+{"ts": "2026-11-18T06:00:13+00:00", "request_id": "b31f58b83fea", "event": "final", "verified": true, "confidence": 0.9, "retries": 0, "changes": [], "llm_calls": 1, "tool_turns": 0, "input_tokens": 2925, "output_tokens": 615, "cache_read_tokens": 1924, "cache_write_tokens": 997}

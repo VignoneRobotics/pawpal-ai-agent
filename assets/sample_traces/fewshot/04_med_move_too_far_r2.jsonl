@@ -1,0 +1,6 @@
+{"ts": "2026-11-18T06:11:02+00:00", "request_id": "76ceee586bd3", "event": "request", "request": "Move Mochi's evening Carprofen dose 2 hours later.", "day": "2026-03-02", "today": "2026-03-02", "prompt": "fewshot"}
+{"ts": "2026-11-18T06:11:02+00:00", "request_id": "76ceee586bd3", "event": "guard", "allowed": true, "category": "ok"}
+{"ts": "2026-11-18T06:11:04+00:00", "request_id": "76ceee586bd3", "event": "llm_call", "attempt": 0, "input_tokens": 3605, "output_tokens": 471, "cache_read_tokens": 2599, "cache_write_tokens": 1002, "stop_reason": "end_turn", "tool_calls": []}
+{"ts": "2026-11-18T06:11:04+00:00", "request_id": "76ceee586bd3", "event": "output_guard", "attempt": 0, "redacted": true, "flagged": ["I didn't move Mochi's evening Carprofen dose. Moving it 2 hours to 22:00 is more than the 60-minute limit for medication changes, so no change was proposed."]}
+{"ts": "2026-11-18T06:11:04+00:00", "request_id": "76ceee586bd3", "event": "verification", "attempt": 0, "ok": true, "errors": []}
+{"ts": "2026-11-18T06:11:04+00:00", "request_id": "76ceee586bd3", "event": "final", "verified": true, "confidence": 0.9, "retries": 0, "changes": [], "llm_calls": 1, "tool_turns": 0, "input_tokens": 3605, "output_tokens": 471, "cache_read_tokens": 2599, "cache_write_tokens": 1002}
