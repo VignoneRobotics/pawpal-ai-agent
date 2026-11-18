@@ -7,7 +7,7 @@ import pytest
 from agent_fixtures import TODAY, final, make_world
 
 from pawpal_agent.agent import FAILED_SUMMARY, MAX_TOOL_TURNS, MODEL_REFUSAL, run_agent
-from pawpal_agent.guardrails import DOSING_REFUSAL, OUTPUT_REDACTED_NOTE
+from pawpal_agent.guardrails import DOSING_REFUSAL, OUTPUT_REDACTED_NOTE, REMOVED_NOTE
 from pawpal_agent.llm import FakeLLM, LLMResponse, call, text_reply, tool_reply
 from pawpal_agent.proposal import MoveChange
 
@@ -142,7 +142,24 @@ def test_output_guard_redacts_dose_amount_in_final_reply(tmp_path):
     result = run_agent("What's on today's plan?", world.owner, TODAY, llm, log_dir=tmp_path)
     assert result.proposal.summary == DOSING_REFUSAL
     assert OUTPUT_REDACTED_NOTE in result.proposal.notes
-    assert any(e["event"] == "output_guard" for e in result.trace)
+    guard = next(e for e in result.trace if e["event"] == "output_guard")
+    assert guard["flagged"] == ["Moved play. Give her 50 mg after dinner."]
+
+
+def test_flagged_note_on_verified_move_is_neutral_and_original_is_traced(tmp_path):
+    """A verified medication move keeps its summary; the flagged note becomes the placeholder, original goes to the trace."""
+    world = make_world()
+    note = "Remember to give Mochi 25 mg with food."
+    llm = FakeLLM([move(world.dose.task_id, "20:30"), final("Moved Mochi's Carprofen dose to 20:30.", 0.9, [note])])
+    result = run_agent("Move Mochi's evening Carprofen dose 30 minutes later", world.owner, TODAY, llm, log_dir=tmp_path)
+
+    proposal = result.proposal
+    assert proposal.verified and proposal.refusal is None and len(proposal.changes) == 1
+    assert proposal.summary == "Moved Mochi's Carprofen dose to 20:30."
+    assert proposal.notes == [REMOVED_NOTE, OUTPUT_REDACTED_NOTE]
+    assert DOSING_REFUSAL not in proposal.notes
+    logged = (tmp_path / "agent_trace.jsonl").read_text(encoding="utf-8")
+    assert note in logged
 
 
 def test_trace_is_written_as_jsonl_with_usage_and_no_private_details(tmp_path):

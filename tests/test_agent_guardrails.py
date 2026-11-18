@@ -11,6 +11,7 @@ from pawpal_agent.guardrails import (
     MEDICATION_FORM_ERROR,
     OUT_OF_SCOPE_REFUSAL,
     OUTPUT_REDACTED_NOTE,
+    REMOVED_NOTE,
     check_invariants,
     check_request,
     redact_dosing,
@@ -86,16 +87,29 @@ def test_empty_and_too_long_requests_are_refused():
 def test_output_guard_redacts_dose_amounts():
     """A summary or note stating a dose is replaced with the scripted refusal and flagged."""
     reply = FinalReply("Moved the walk; give her 50 mg after.", 0.9, ["Carprofen is fine", "give her 50 mg"], None)
-    cleaned, redacted = redact_dosing(reply, DRUGS)
-    assert redacted
+    cleaned, flagged = redact_dosing(reply, DRUGS)
+    assert flagged == ["Moved the walk; give her 50 mg after.", "give her 50 mg"]
     assert cleaned.summary == DOSING_REFUSAL
     assert cleaned.notes == ["Carprofen is fine", DOSING_REFUSAL, OUTPUT_REDACTED_NOTE]
+
+
+def test_output_guard_on_a_proposal_with_changes_uses_a_neutral_placeholder():
+    """With changes, flagged summary/notes become REMOVED_NOTE (not a refusal); the refusal field still gets it."""
+    reply = FinalReply("Moved the dose; give her 50 mg.", 0.9, ["Dose stays the same.", "give her 50 mg"], None)
+    cleaned, flagged = redact_dosing(reply, DRUGS, has_changes=True)
+    assert cleaned.summary == REMOVED_NOTE
+    assert cleaned.notes == ["Dose stays the same.", REMOVED_NOTE, OUTPUT_REDACTED_NOTE]
+    assert DOSING_REFUSAL not in cleaned.notes
+    assert flagged == ["Moved the dose; give her 50 mg.", "give her 50 mg"]
+
+    refusing = FinalReply("No change.", 0.5, [], "You should give her 50 mg.")
+    assert redact_dosing(refusing, DRUGS, has_changes=True)[0].refusal == DOSING_REFUSAL
 
 
 def test_output_guard_leaves_normal_text_alone():
     """Scheduling summaries, including moving a dose, pass untouched."""
     reply = FinalReply("Moved Mochi's Carprofen dose to 20:30 to avoid the walk.", 0.8, ["No conflicts."], None)
-    assert redact_dosing(reply, DRUGS) == (reply, False)
+    assert redact_dosing(reply, DRUGS) == (reply, [])
 
 
 @pytest.mark.parametrize(
@@ -110,7 +124,7 @@ def test_output_guard_leaves_normal_text_alone():
 def test_output_guard_allows_verified_scheduling_summaries(summary):
     """Past-tense scheduling statements that mention a dose (or "half an hour") are not dosing advice."""
     reply = FinalReply(summary, 0.8, [], None)
-    assert redact_dosing(reply, DRUGS) == (reply, False)
+    assert redact_dosing(reply, DRUGS) == (reply, [])
 
 
 @pytest.mark.parametrize(
@@ -124,8 +138,8 @@ def test_output_guard_allows_verified_scheduling_summaries(summary):
 )
 def test_output_guard_still_redacts_amounts_with_give_or_half_a_dose(summary):
     """An amount next to give/administer, or "half a tablet", is redacted even inside a scheduling sentence."""
-    cleaned, redacted = redact_dosing(FinalReply(summary, 0.8, [], None), DRUGS)
-    assert redacted and cleaned.summary == DOSING_REFUSAL
+    cleaned, flagged = redact_dosing(FinalReply(summary, 0.8, [], None), DRUGS)
+    assert flagged == [summary] and cleaned.summary == DOSING_REFUSAL
 
 
 def test_input_guard_half_an_hour_is_timing_but_half_a_tablet_is_dosing():

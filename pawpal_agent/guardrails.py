@@ -28,6 +28,7 @@ OUT_OF_SCOPE_REFUSAL = "I can only help with scheduling your pets' care tasks."
 EMPTY_REFUSAL = "Please type a scheduling request, for example: 'Move Mochi's walk to 09:00'."
 TOO_LONG_REFUSAL = "That request is too long. Please keep it under 500 characters."
 OUTPUT_REDACTED_NOTE = "output guard redacted dosing text"
+REMOVED_NOTE = "[note removed by medication safety filter]"
 MEDICATION_FORM_ERROR = "medication tasks must be created via the medication form"
 
 MAX_REQUEST_CHARS = 500
@@ -125,20 +126,30 @@ def check_request(text: str, pet_names: tuple[str, ...] = (), drug_names: tuple[
 # --- output guard ---
 
 
-def redact_dosing(reply: FinalReply, drug_names: tuple[str, ...] = ()) -> tuple[FinalReply, bool]:
-    """Replace any summary, note, or refusal that states or discusses a dose with the scripted refusal."""
+def redact_dosing(
+    reply: FinalReply, drug_names: tuple[str, ...] = (), has_changes: bool = False
+) -> tuple[FinalReply, list[str]]:
+    """Replace dosing text in the reply; return the cleaned reply and the original flagged texts (for the trace).
 
-    def clean(text: str) -> str:
-        """Return the scripted refusal if text is dosing text, else text unchanged (scheduling statements pass)."""
-        return DOSING_REFUSAL if is_dosing_text(text, drug_names, allow_scheduling_amounts=True) else text
+    On a proposal with changes, a flagged summary/note becomes REMOVED_NOTE so a valid change doesn't read
+    like a refusal; the refusal field, or a reply with no changes, gets the scripted DOSING_REFUSAL.
+    """
+    flagged: list[str] = []
 
-    summary = clean(reply.summary)
-    notes = [clean(n) for n in reply.notes]
-    refusal = clean(reply.refusal) if reply.refusal else reply.refusal
-    redacted = (summary, notes, refusal) != (reply.summary, reply.notes, reply.refusal)
-    if redacted:
+    def clean(text: str, replacement: str) -> str:
+        """Return replacement if text is dosing text (scheduling statements pass), else text unchanged."""
+        if is_dosing_text(text, drug_names, allow_scheduling_amounts=True):
+            flagged.append(text)
+            return replacement
+        return text
+
+    body_replacement = REMOVED_NOTE if has_changes else DOSING_REFUSAL
+    summary = clean(reply.summary, body_replacement)
+    notes = [clean(n, body_replacement) for n in reply.notes]
+    refusal = clean(reply.refusal, DOSING_REFUSAL) if reply.refusal else reply.refusal
+    if flagged:
         notes.append(OUTPUT_REDACTED_NOTE)
-    return replace(reply, summary=summary, notes=notes, refusal=refusal), redacted
+    return replace(reply, summary=summary, notes=notes, refusal=refusal), flagged
 
 
 # --- verifier ---

@@ -220,9 +220,9 @@ def run_agent(
             errors = failed.errors
             trace.log("attempt_failed", attempt=attempt, errors=errors)
         else:
-            reply, redacted = redact_dosing(reply, drug_names)
-            if redacted:
-                trace.log("output_guard", attempt=attempt, redacted=True)
+            reply, flagged = redact_dosing(reply, drug_names, has_changes=bool(session.changes))
+            if flagged:  # originals kept only in the git-ignored trace, to tune the detector
+                trace.log("output_guard", attempt=attempt, redacted=True, flagged=flagged)
             proposal = Proposal(
                 request,
                 day,

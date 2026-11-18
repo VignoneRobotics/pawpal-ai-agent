@@ -7,7 +7,7 @@ Today is fixed to 2026-03-02 (sample data only)
 Guard: allowed
 Tool calls:
   - [attempt 0] find_conflicts(day='2026-03-02')
-  - [attempt 0] propose_move_task(task_id='844c735c', new_time='16:00')
+  - [attempt 0] propose_move_task(task_id='ff5231de', new_time='16:00')
 Proposal:
   Summary: Moved Mochi's bath to 16:00 so it no longer overlaps the evening walk.
   Change: MOVE Bath (Mochi) at 17:00 -> 16:00
@@ -54,7 +54,7 @@ Owner approves (simulated) -> apply_proposal:
 Guard: allowed
 Tool calls:
   - [attempt 0] list_tasks(day='2026-03-02', pet_name='Mochi')
-  - [attempt 0] propose_move_task(task_id='a141564c', new_time='20:30')
+  - [attempt 0] propose_move_task(task_id='a0a8ee9d', new_time='20:30')
 Proposal:
   Summary: Moved Mochi's evening Carprofen dose half an hour later, to 20:30.
   Change: MOVE Carprofen (Mochi) at 20:00 -> 20:30
