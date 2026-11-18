@@ -6,9 +6,9 @@ import json
 import pytest
 from agent_fixtures import TODAY, final, make_world
 
-from pawpal_agent.agent import FAILED_SUMMARY, MAX_TOOL_TURNS, run_agent
+from pawpal_agent.agent import FAILED_SUMMARY, MAX_TOOL_TURNS, MODEL_REFUSAL, run_agent
 from pawpal_agent.guardrails import DOSING_REFUSAL, OUTPUT_REDACTED_NOTE
-from pawpal_agent.llm import FakeLLM, call, text_reply, tool_reply
+from pawpal_agent.llm import FakeLLM, LLMResponse, call, text_reply, tool_reply
 from pawpal_agent.proposal import MoveChange
 
 
@@ -161,3 +161,33 @@ def test_trace_is_written_as_jsonl_with_usage_and_no_private_details(tmp_path):
     assert events[-1]["tool_turns"] == 2
     assert "25 mg" not in text and "Dr. Lee" not in text and "555-0100" not in text
     assert events == result.trace
+
+
+def test_model_safety_refusal_returns_refusal_without_changes(tmp_path):
+    """stop_reason "refusal" ends the run at once: a refusal proposal with no changes and no retries."""
+    world = make_world()
+    llm = FakeLLM([LLMResponse(stop_reason="refusal")])
+    result = run_agent("Move Mochi's play to 11:00", world.owner, TODAY, llm, log_dir=tmp_path)
+    assert result.proposal.refusal == MODEL_REFUSAL and result.proposal.changes == []
+    assert len(llm.calls) == 1 and result.trace[-1]["refusal"] == "model"
+
+
+def test_max_tokens_cutoff_is_fed_back_and_retried(tmp_path):
+    """A reply cut off by max_tokens costs one retry with a "use fewer words" message."""
+    world = make_world()
+    llm = FakeLLM([LLMResponse(text='{"summary": "Moved', stop_reason="max_tokens"), final(confidence=0.9)])
+    result = run_agent("What's on today's plan?", world.owner, TODAY, llm, log_dir=tmp_path)
+    assert "cut off" in last_text(llm.calls[1])
+    assert result.proposal.verified and result.proposal.retries == 1
+
+
+def test_cache_counters_are_summed_into_usage_and_trace(tmp_path):
+    """Per-call cache read/write tokens add up in Usage and appear in the final trace event."""
+    world = make_world()
+    llm = FakeLLM([
+        LLMResponse(tool_calls=list_today().tool_calls, input_tokens=1500, cache_write_tokens=1200),
+        LLMResponse(text=final().text, input_tokens=1600, cache_read_tokens=1200),
+    ])
+    result = run_agent("What's on today's plan?", world.owner, TODAY, llm, log_dir=tmp_path)
+    assert (result.usage.cache_read_tokens, result.usage.cache_write_tokens) == (1200, 1200)
+    assert result.trace[-1]["cache_read_tokens"] == 1200

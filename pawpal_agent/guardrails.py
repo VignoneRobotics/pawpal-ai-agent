@@ -43,13 +43,18 @@ _AMOUNT = re.compile(
     r"\b\d+(?:\.\d+)?\s*(mg|mcg|ml|cc|milligrams?|millilit(?:er|re)s?|units?|iu|tablets?|pills?|capsules?|drops)\b"
 )
 _DOSE_INTENT = re.compile(
-    r"\b(how much|how many|increase|decrease|reduce|raise|lower|double|triple|halve|half|"
+    r"\b(how much|how many|increase|decrease|reduce|raise|lower|double|triple|halve|"
     r"extra|more|less|adjust|convert|calculate|safe|missed|skip a dose|right amount|"
     r"change the dose|can i give)\b"
+    r"|\bhalf\b(?!\s+(?:an\s+)?hours?\b)"  # "half a tablet" is dosing; "half an hour later" is timing
     r"|\bshould\b.*\b(get|give|take|have)\b"
 )
 _MED_WORDS = re.compile(r"\b(medication|medicine|meds|drug|prescription|antibiotics?|painkillers?)\b")
-_SCHEDULING_VERB = re.compile(r"\b(move|moving|reschedule|shift|push|change the time)\b")
+_SCHEDULING_VERB = re.compile(
+    r"\b(move|moved|moving|reschedule|rescheduled|shift|shifted|push|pushed|change the time)\b"
+)
+# An amount next to one of these is always dosing, even in a scheduling sentence ("Moved play. Give her 50 mg").
+_ADMIN_VERB = re.compile(r"\b(give|giving|gave|administer\w*)\b")
 _SCOPE_WORDS = re.compile(
     r"\b(schedule|reschedule|plan|planning|task|tasks|walk|walks|feed|feeding|food|meal|groom|grooming|"
     r"bath|brush|vet|appointment|play|litter|clean|medication|meds|dose|pill|move|shift|push|add|"
@@ -85,7 +90,7 @@ def is_dosing_text(text: str, drug_names: tuple[str, ...] = (), allow_scheduling
         return True
     if _AMOUNT.search(lowered):
         is_scheduling = allow_scheduling_amounts and bool(_SCHEDULING_VERB.search(lowered))
-        return not is_scheduling or has_intent
+        return not is_scheduling or has_intent or bool(_ADMIN_VERB.search(lowered))
     return False
 
 
@@ -124,8 +129,8 @@ def redact_dosing(reply: FinalReply, drug_names: tuple[str, ...] = ()) -> tuple[
     """Replace any summary, note, or refusal that states or discusses a dose with the scripted refusal."""
 
     def clean(text: str) -> str:
-        """Return the scripted refusal if text is dosing text, else text unchanged."""
-        return DOSING_REFUSAL if is_dosing_text(text, drug_names) else text
+        """Return the scripted refusal if text is dosing text, else text unchanged (scheduling statements pass)."""
+        return DOSING_REFUSAL if is_dosing_text(text, drug_names, allow_scheduling_amounts=True) else text
 
     summary = clean(reply.summary)
     notes = [clean(n) for n in reply.notes]

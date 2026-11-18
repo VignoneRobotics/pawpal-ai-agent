@@ -41,6 +41,6 @@ def test_tool_call_ids_are_unique():
 
 
 def test_importing_the_agent_package_does_not_import_anthropic():
-    """Phase 2 is fully offline: the anthropic SDK is never imported."""
-    code = "import sys, pawpal_agent; sys.exit(1 if 'anthropic' in sys.modules else 0)"
+    """Importing the package stays offline: anthropic and dotenv load only when AnthropicClient is built."""
+    code = "import sys, pawpal_agent; sys.exit(1 if {'anthropic', 'dotenv'} & set(sys.modules) else 0)"
     assert subprocess.run([sys.executable, "-c", code]).returncode == 0

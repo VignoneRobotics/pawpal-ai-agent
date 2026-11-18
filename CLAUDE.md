@@ -111,6 +111,10 @@ Planned modules (names may be adjusted in each phase's plan):
 - Phase 2: Kyle added three safety revisions to the AI's plan: an output guard that redacts dosing text in the model's summary/notes; verifier rejects AddChange descriptions that look like medication ("medication tasks must be created via the medication form"); input guard lets "move the 25 mg dose" through when a scheduling verb is present and no dose-intent word.
 - Phase 2: AI design choice: the ±60 min dose tolerance is anchored to the prescribed time nearest the dose's original time, so an 08:00 dose cannot slide to 19:30 (near the 20:00 slot).
 - Phase 2: agent mistake caught by tests: the "add over budget" test first used a medium-priority add, which outranked low-priority Play and displaced it instead of being skipped; fixed the test setup (verifier behavior was correct).
+- Phase 3 (Step 0, code-review bug): the output guard redacted verified summaries ("Moved Mochi's 25 mg Carprofen dose to 08:30", "Moved the evening pill half an hour later"). Fix per Kyle: past-tense scheduling verbs, redact_dosing uses allow_scheduling_amounts=True, "half" is not dose intent before "an hour"/"hour". Accepted AI deviation: an amount next to give/gave/administer is always dosing, because otherwise "Moved play. Give her 50 mg" would pass the output guard (also closed the same input-guard hole: "Move the Carprofen to 08:30 and give 50 mg").
+- Phase 3: accepted AI deviations: (1) LLMResponse carries the raw assistant blocks and the agent sends them back unchanged, because Haiku 5.5 thinks by default and thinking blocks must be replayed with tool_use turns (append-only history); (2) stop_reason "refusal" -> refusal proposal, "max_tokens" -> normal retry; (3) thinking left on with effort pinned to "medium" instead of disabling thinking; (4) LLMError/MissingAPIKeyError so callers never import anthropic.
+- Phase 3: caching layout: cache breakpoint on the system block (caches tools + system, both constant) plus top-level automatic caching of the conversation for later tool turns/retries. Usage logs cache read/write tokens.
+- Phase 3: Kyle added agent_demo.py --save PATH (UTF-8), because PowerShell 5.1 ">" writes UTF-16. Committed samples: assets/agent_demo_mock.txt (AI-generated) and assets/agent_demo_real.txt (Kyle's real run). pip installed anthropic 2.10 (not 1.x as planned); requirements pin anthropic>=2.10.
 - Phase 2: known limitation: input/output guards are keyword/regex based (e.g. the scheduling question "Can I give Mochi's pill at 9 instead?" is refused as dosing because "can I give" + "pill" matches; unknown drug names are only recognized if they exist in the owner's medication tasks).
 
 ---
@@ -179,7 +183,8 @@ py -3.14 -m venv .venv          # once (python is not on PATH; use the py launch
 .\.venv\Scripts\Activate.ps1   # Windows PowerShell
 pip install -r requirements.txt
 python main.py                  # Module 2 CLI demo
-python agent_demo.py            # Project 4 agent demo (Phase 3+)
+python agent_demo.py            # Project 4 agent demo (Phase 3+), needs .env key
+python agent_demo.py --mock --save assets/agent_demo_mock.txt   # offline, UTF-8 output file
 python eval.py                  # evaluation harness (Phase 6+, needs API key)
 python -m pytest                # offline tests
 streamlit run app.py

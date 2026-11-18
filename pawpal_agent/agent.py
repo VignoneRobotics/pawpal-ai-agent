@@ -18,6 +18,7 @@ from .tools import TOOL_SCHEMAS, ToolSession, tasks_for_day
 MAX_TOOL_TURNS = 6  # per attempt
 MAX_VERIFIER_RETRIES = 2  # so at most 3 attempts
 FAILED_SUMMARY = "I couldn't find a schedule change that passes the safety checks. Nothing was changed."
+MODEL_REFUSAL = "The assistant declined this request. Nothing was changed."
 
 # Kept constant (no per-request text) so it can be prompt-cached in Phase 3.
 SYSTEM_PROMPT = """You are PawPal+, a pet-care scheduling assistant. You PROPOSE schedule changes; a deterministic \
@@ -45,6 +46,8 @@ class Usage:
     tool_turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass
@@ -63,6 +66,10 @@ class AttemptFailed(Exception):
         """Store the errors to feed back to the model."""
         super().__init__("; ".join(errors))
         self.errors = errors
+
+
+class ModelRefused(Exception):
+    """The model's safety classifier declined the request (stop_reason "refusal")."""
 
 
 def build_context(owner: Owner, day: date, today: date, request: str) -> str:
@@ -116,20 +123,31 @@ def _run_attempt(
         usage.llm_calls += 1
         usage.input_tokens += response.input_tokens
         usage.output_tokens += response.output_tokens
+        usage.cache_read_tokens += response.cache_read_tokens
+        usage.cache_write_tokens += response.cache_write_tokens
         trace.log(
             "llm_call",
             attempt=attempt,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
+            cache_read_tokens=response.cache_read_tokens,
+            cache_write_tokens=response.cache_write_tokens,
+            stop_reason=response.stop_reason,
             tool_calls=[c.name for c in response.tool_calls],
         )
 
+        if response.stop_reason == "refusal":
+            raise ModelRefused()
+
         if response.tool_calls:
-            assistant = [{"type": "text", "text": response.text}] if response.text else []
-            assistant += [
-                {"type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments}
-                for c in response.tool_calls
-            ]
+            if response.assistant_content:  # real model: send its blocks (incl. thinking) back unchanged
+                assistant = list(response.assistant_content)
+            else:
+                assistant = [{"type": "text", "text": response.text}] if response.text else []
+                assistant += [
+                    {"type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments}
+                    for c in response.tool_calls
+                ]
             messages.append({"role": "assistant", "content": assistant})
 
             if tool_turns >= MAX_TOOL_TURNS:  # answer the calls (API needs it) but don't run them
@@ -154,7 +172,12 @@ def _run_attempt(
             messages.append({"role": "user", "content": results})
             continue
 
-        messages.append({"role": "assistant", "content": response.text or "(empty)"})
+        if response.assistant_content:
+            messages.append({"role": "assistant", "content": list(response.assistant_content)})
+        else:
+            messages.append({"role": "assistant", "content": response.text or "(empty)"})
+        if response.stop_reason == "max_tokens":
+            raise AttemptFailed(["your reply was cut off (max_tokens); use fewer words"])
         try:
             return parse_final_reply(response.text, len(session.changes))
         except ValueError as err:
@@ -189,6 +212,10 @@ def run_agent(
     for attempt in range(MAX_VERIFIER_RETRIES + 1):
         try:
             reply = _run_attempt(llm, session, messages, trace, usage, attempt)
+        except ModelRefused:
+            proposal = Proposal(request, day, refusal=MODEL_REFUSAL, verified=True, retries=attempt)
+            trace.log("final", verified=True, refusal="model", changes=[], **vars(usage))
+            return AgentResult(proposal, trace.events, usage)
         except AttemptFailed as failed:
             errors = failed.errors
             trace.log("attempt_failed", attempt=attempt, errors=errors)

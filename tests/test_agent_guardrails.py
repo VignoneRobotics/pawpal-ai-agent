@@ -98,6 +98,43 @@ def test_output_guard_leaves_normal_text_alone():
     assert redact_dosing(reply, DRUGS) == (reply, False)
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "Moved Mochi's 25 mg Carprofen dose to 08:30",
+        "Moved the evening pill half an hour later",
+        "Rescheduled the 25 mg dose to 20:30.",
+        "Shifted the evening tablet a half hour later.",
+    ],
+)
+def test_output_guard_allows_verified_scheduling_summaries(summary):
+    """Past-tense scheduling statements that mention a dose (or "half an hour") are not dosing advice."""
+    reply = FinalReply(summary, 0.8, [], None)
+    assert redact_dosing(reply, DRUGS) == (reply, False)
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "give her 50 mg",
+        "Moved the walk; give her 50 mg after.",
+        "Moved the dose to 08:30 and administered 25 mg.",
+        "Moved the dose and gave half a tablet.",
+    ],
+)
+def test_output_guard_still_redacts_amounts_with_give_or_half_a_dose(summary):
+    """An amount next to give/administer, or "half a tablet", is redacted even inside a scheduling sentence."""
+    cleaned, redacted = redact_dosing(FinalReply(summary, 0.8, [], None), DRUGS)
+    assert redacted and cleaned.summary == DOSING_REFUSAL
+
+
+def test_input_guard_half_an_hour_is_timing_but_half_a_tablet_is_dosing():
+    """'half an hour' is a time; 'half a tablet' and 'give 50 mg' are dosing, even with a scheduling verb."""
+    assert check_request("Move the evening pill half an hour later", PETS, DRUGS).allowed
+    assert check_request("Can I give half a tablet?", PETS, DRUGS).category == "dosing"
+    assert check_request("Move the Carprofen to 08:30 and give 50 mg", PETS, DRUGS).category == "dosing"
+
+
 # --- parsing ---
 
 

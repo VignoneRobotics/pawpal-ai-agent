@@ -1,0 +1,98 @@
+PawPal+ agent demo | MOCK: FakeLLM scripted responses (no API calls; token counts are placeholders)
+Today is fixed to 2026-03-02 (sample data only)
+
+========================================================================
+(a) Request: Fix today's conflict between Mochi's bath and evening walk.
+========================================================================
+Guard: allowed
+Tool calls:
+  - [attempt 0] find_conflicts(day='2026-03-02')
+  - [attempt 0] propose_move_task(task_id='844c735c', new_time='16:00')
+Proposal:
+  Summary: Moved Mochi's bath to 16:00 so it no longer overlaps the evening walk.
+  Change: MOVE Bath (Mochi) at 17:00 -> 16:00
+    Rationale: Bath is lower priority than the walk, and 16:00-16:30 is free.
+  Verified: True | retries: 0 | confidence: model 0.85 -> final 0.85
+Usage: 3 LLM calls, 2 tool turns, tokens in 300 (cache read 0, cache write 0), out 70
+Owner approves (simulated) -> apply_proposal:
+  Moved Bath (Mochi) to 2026-03-02 16:00
+  Plan for 2026-03-02 (130/150 min used):
+    Planned: Morning walk (Mochi) at 07:30, 30 min, high priority - fits in the 150-minute budget.
+    Planned: Carprofen (Mochi) at 08:00, 5 min, high priority - fits in the 150-minute budget.
+    Planned: Breakfast (Bean) at 08:15, 10 min, high priority - fits in the 150-minute budget.
+    Planned: Evening walk (Mochi) at 17:15, 30 min, high priority - fits in the 150-minute budget.
+    Planned: Carprofen (Mochi) at 20:00, 5 min, high priority - fits in the 150-minute budget.
+    Planned: Bath (Mochi) at 16:00, 30 min, medium priority - fits in the 150-minute budget.
+    Planned: Laser play (Bean) at 19:00, 20 min, low priority - fits in the 150-minute budget.
+  Conflicts: none
+
+========================================================================
+(b) Request: Add a 30-minute grooming session for Mochi tomorrow.
+========================================================================
+Guard: allowed
+Tool calls:
+  - [attempt 0] next_available_slot(duration_minutes=30, day='2026-03-03')
+  - [attempt 0] propose_add_task(pet_name='Mochi', description='Grooming session', time='07:00', duration_minutes=30, due_date='2026-03-03', priority='medium')
+Proposal:
+  Summary: Added a 30-minute grooming session for Mochi tomorrow at the first free slot.
+  Change: ADD Grooming session (Mochi) on 2026-03-03 at 07:00, 30 min, medium
+    Rationale: 07:00 is the first free 30-minute slot tomorrow.
+  Verified: True | retries: 0 | confidence: model 0.90 -> final 0.90
+Usage: 3 LLM calls, 2 tool turns, tokens in 300 (cache read 0, cache write 0), out 70
+Owner approves (simulated) -> apply_proposal:
+  Added Grooming session (Mochi) on 2026-03-03 at 07:00
+  Plan for 2026-03-03 (70/150 min used):
+    Planned: Morning walk (Mochi) at 07:30, 30 min, high priority - fits in the 150-minute budget.
+    Planned: Carprofen (Mochi) at 08:00, 5 min, high priority - fits in the 150-minute budget.
+    Planned: Carprofen (Mochi) at 20:00, 5 min, high priority - fits in the 150-minute budget.
+    Planned: Grooming session (Mochi) at 07:00, 30 min, medium priority - fits in the 150-minute budget.
+  Conflicts: none
+
+========================================================================
+(c) Request: Move Mochi's evening Carprofen dose 30 minutes later.
+========================================================================
+Guard: allowed
+Tool calls:
+  - [attempt 0] list_tasks(day='2026-03-02', pet_name='Mochi')
+  - [attempt 0] propose_move_task(task_id='a141564c', new_time='20:30')
+Proposal:
+  Summary: Moved Mochi's evening Carprofen dose half an hour later, to 20:30.
+  Change: MOVE Carprofen (Mochi) at 20:00 -> 20:30
+    Rationale: Owner asked for 30 minutes later; 20:30 is within 60 min of the prescribed 20:00.
+  Note: The dose amount is unchanged.
+  Verified: True | retries: 0 | confidence: model 0.90 -> final 0.90
+Usage: 3 LLM calls, 2 tool turns, tokens in 300 (cache read 0, cache write 0), out 70
+Owner approves (simulated) -> apply_proposal:
+  Moved Carprofen (Mochi) to 2026-03-02 20:30
+  Plan for 2026-03-02 (100/150 min used):
+    Planned: Morning walk (Mochi) at 07:30, 30 min, high priority - fits in the 150-minute budget.
+    Planned: Carprofen (Mochi) at 08:00, 5 min, high priority - fits in the 150-minute budget.
+    Planned: Breakfast (Bean) at 08:15, 10 min, high priority - fits in the 150-minute budget.
+    Planned: Evening walk (Mochi) at 17:15, 30 min, high priority - fits in the 150-minute budget.
+    Planned: Carprofen (Mochi) at 20:30, 5 min, high priority - fits in the 150-minute budget.
+    Planned: Laser play (Bean) at 19:00, 20 min, low priority - fits in the 150-minute budget.
+    Skipped: Bath (Mochi) at 17:00 - overlaps Evening walk, which was planned first.
+  Conflicts: Conflict (same pet: Mochi): Bath 17:00-17:30 overlaps Evening walk 17:15-17:45
+
+========================================================================
+(d) Request: How much Carprofen should I give Mochi?
+========================================================================
+Guard: REFUSED (dosing)
+Tool calls: none
+Proposal:
+  Refusal: I can't give dosing advice. Please follow your veterinarian's prescription or contact them directly.
+  Verified: True | retries: 0 | confidence: model 1.00 -> final 1.00
+Usage: 0 LLM calls, 0 tool turns, tokens in 0 (cache read 0, cache write 0), out 0
+Nothing to approve; schedule unchanged.
+
+========================================================================
+(e) Request: Can you book me a flight to Denver?
+========================================================================
+Guard: REFUSED (out_of_scope)
+Tool calls: none
+Proposal:
+  Refusal: I can only help with scheduling your pets' care tasks.
+  Verified: True | retries: 0 | confidence: model 1.00 -> final 1.00
+Usage: 0 LLM calls, 0 tool turns, tokens in 0 (cache read 0, cache write 0), out 0
+Nothing to approve; schedule unchanged.
+
