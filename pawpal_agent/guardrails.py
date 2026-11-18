@@ -50,6 +50,16 @@ _DOSE_INTENT = re.compile(
     r"|\bhalf\b(?!\s+(?:an\s+)?hours?\b)"  # "half a tablet" is dosing; "half an hour later" is timing
     r"|\bshould\b.*\b(get|give|take|have)\b"
 )
+# "How much ... give" / "should I give ..." is a dosing question even for drug names we don't know,
+# unless it names a care activity or an existing (non-medication) task and has no dose word or amount.
+_ADMIN_QUESTION = re.compile(
+    r"\b(how much|how many)\b.*\b(give|giving|administer\w*)\b"
+    r"|\bshould i\b.*\b(give|administer\w*)\b"
+)
+_CARE_WORDS = re.compile(
+    r"\b(walks?|walking|baths?|bathing|brush|brushing|groom|grooming|play|playtime|feed|feeding|"
+    r"food|kibble|meals?|treats?|water|cups?)\b"
+)
 _MED_WORDS = re.compile(r"\b(medication|medicine|meds|drug|prescription|antibiotics?|painkillers?)\b")
 _SCHEDULING_VERB = re.compile(
     r"\b(move|moved|moving|reschedule|rescheduled|shift|shifted|push|pushed|change the time)\b"
@@ -76,11 +86,32 @@ def has_amount(text: str) -> bool:
     return bool(_AMOUNT.search(text.lower()))
 
 
-def is_dosing_text(text: str, drug_names: tuple[str, ...] = (), allow_scheduling_amounts: bool = False) -> bool:
+def _names_care(lowered: str, task_names: tuple[str, ...]) -> bool:
+    """Return True if lowered text names a care activity or one of the given task descriptions."""
+    return bool(_CARE_WORDS.search(lowered)) or any(
+        re.search(rf"\b{re.escape(n.lower().strip())}\b", lowered) for n in task_names if n.strip()
+    )
+
+
+def is_dosing_text(
+    text: str,
+    drug_names: tuple[str, ...] = (),
+    allow_scheduling_amounts: bool = False,
+    task_names: tuple[str, ...] = (),
+) -> bool:
     """Return True if text asks about or states a dose amount; optionally let "move the 25 mg dose" through."""
     lowered = text.lower()
     if _STRONG_DOSE_WORDS.search(lowered):
         return True
+    if _ADMIN_QUESTION.search(lowered):
+        about_care = _names_care(lowered, task_names) and not (
+            _DOSE_WORDS.search(lowered)
+            or _AMOUNT.search(lowered)
+            or _MED_WORDS.search(lowered)
+            or any(re.search(rf"\b{re.escape(d.lower())}\b", lowered) for d in drug_names if d.strip())
+        )
+        if not about_care:
+            return True
     has_intent = bool(_DOSE_INTENT.search(lowered))
     mentions_med = bool(
         _DOSE_WORDS.search(lowered)
@@ -107,14 +138,19 @@ class GuardResult:
     message: str = ""
 
 
-def check_request(text: str, pet_names: tuple[str, ...] = (), drug_names: tuple[str, ...] = ()) -> GuardResult:
-    """Refuse empty, overlong, dosing, or out-of-scope requests before any LLM call."""
+def check_request(
+    text: str,
+    pet_names: tuple[str, ...] = (),
+    drug_names: tuple[str, ...] = (),
+    task_names: tuple[str, ...] = (),
+) -> GuardResult:
+    """Refuse empty, overlong, dosing, or out-of-scope requests before any LLM call (task_names: non-med tasks)."""
     stripped = text.strip()
     if not stripped:
         return GuardResult(False, "empty", EMPTY_REFUSAL)
     if len(stripped) > MAX_REQUEST_CHARS:
         return GuardResult(False, "too_long", TOO_LONG_REFUSAL)
-    if is_dosing_text(stripped, drug_names, allow_scheduling_amounts=True):
+    if is_dosing_text(stripped, drug_names, allow_scheduling_amounts=True, task_names=task_names):
         return GuardResult(False, "dosing", DOSING_REFUSAL)
     lowered = stripped.lower()
     names_hit = any(re.search(rf"\b{re.escape(n.lower())}\b", lowered) for n in pet_names if n.strip())

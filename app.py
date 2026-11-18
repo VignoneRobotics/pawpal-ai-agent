@@ -28,6 +28,10 @@ if "llm_factory" not in st.session_state:
     st.session_state.llm_factory = llm_module.AnthropicClient if has_key else None
 if "agent_result" not in st.session_state:
     st.session_state.agent_result = None
+if "toasts" not in st.session_state:
+    st.session_state.toasts = []  # (text, icon) waiting to be shown
+if "errors" not in st.session_state:
+    st.session_state.errors = {}  # section -> inline error, kept until that section succeeds
 
 data_file = Path(st.session_state.data_file)
 today: date = st.session_state.today
@@ -57,9 +61,46 @@ def log_event(event: str, request_id: str | None = None, **data: object) -> None
     TraceLogger(st.session_state.log_dir, request_id=request_id).log(event, **data)
 
 
-def flash(level: str, text: str) -> None:
-    """Store a one-shot message ("success", "error", "info") shown at the top of the next run."""
-    st.session_state.flash = (level, text)
+def notify(text: str, icon: str = "✅") -> None:
+    """Queue a floating toast; queued toasts are shown at the top and bottom of every run (survives st.rerun)."""
+    st.session_state.toasts.append((text, icon))
+
+
+def show_toasts() -> None:
+    """Show and clear every queued toast."""
+    while st.session_state.toasts:
+        text, icon = st.session_state.toasts.pop(0)
+        st.toast(text, icon=icon)
+
+
+def report_error(section: str, text: str) -> None:
+    """Toast an error and keep it inline in its section until that section succeeds."""
+    st.session_state.errors[section] = text
+    notify(text, icon="⚠️")
+
+
+def clear_error(section: str) -> None:
+    """Forget a section's inline error after a successful action there."""
+    st.session_state.errors.pop(section, None)
+
+
+def show_error(section: str) -> None:
+    """Render the section's persisting inline error, if any."""
+    if section in st.session_state.errors:
+        st.error(st.session_state.errors[section])
+
+
+def affected_days(proposal: Proposal) -> list[date]:
+    """Return the planning day first, then every other day a change touches (move origin/target, add, complete)."""
+    days: set[date] = set()
+    for change in proposal.changes:
+        found = owner.find_task(change.task_id)
+        if found is not None:
+            days.add(found[1].due_date)
+        target = getattr(change, "new_date", None) or getattr(change, "due_date", None)
+        if target is not None:
+            days.add(target)
+    return [proposal.day] + sorted(days - {proposal.day})
 
 
 def split_reason(reason: str) -> tuple[str, str]:
@@ -127,11 +168,12 @@ def on_approve() -> None:
     try:
         lines = apply_proposal(st.session_state.owner, proposal, st.session_state.today)
     except ValueError as err:
-        flash("error", f"This proposal is out of date and was not applied: {err}. Please ask again.")
+        report_error("agent", f"This proposal is out of date and was not applied: {err}. Please ask again.")
         log_event("human_decision", request_id, decision="approve", applied=False, changes=changes, error=str(err))
     else:
         save()
-        flash("success", "Approved and saved: " + "; ".join(lines))
+        clear_error("agent")
+        notify("Approved and saved: " + "; ".join(lines))
         log_event("human_decision", request_id, decision="approve", applied=True, changes=changes)
     st.session_state.agent_result = None
 
@@ -145,7 +187,11 @@ def on_decline(decision: str) -> None:
     changes = [f"{change_kind(c)} {c.task_id}" for c in result.proposal.changes]
     log_event("human_decision", request_id, decision=decision, applied=False, changes=changes)
     st.session_state.agent_result = None
-    flash("info", "Proposal rejected; nothing was changed." if decision == "reject" else "Dismissed.")
+    clear_error("agent")
+    if decision == "reject":
+        notify("Proposal rejected; nothing was changed.", icon="↩️")
+    else:
+        notify("Dismissed.", icon="ℹ️")
 
 
 def on_do_both(task_id_a: str, task_id_b: str, day: date) -> None:
@@ -153,11 +199,12 @@ def on_do_both(task_id_a: str, task_id_b: str, day: date) -> None:
     try:
         st.session_state.owner.allow_overlap(task_id_a, task_id_b, day)
     except ValueError as err:
-        flash("error", f"Could not allow the overlap: {err}")
+        report_error("schedule", f"Could not allow the overlap: {err}")
         return
     save()
+    clear_error("schedule")
     log_event("human_override", task_a=task_id_a, task_b=task_id_b, day=day.isoformat())
-    flash("success", "OK, both tasks are allowed to overlap on that day.")
+    notify("OK, both tasks are allowed to overlap on that day.")
 
 
 def render_trace(result: AgentResult) -> None:
@@ -182,7 +229,7 @@ def render_trace(result: AgentResult) -> None:
         f"(cache read {u.cache_read_tokens}), out {u.output_tokens}"
     )
     with st.expander("Agent trace"):
-        st.code("\n".join(lines), language=None)
+        st.code("\n".join(lines), language=None, wrap_lines=True)
 
 
 def render_proposal(result: AgentResult) -> None:
@@ -212,13 +259,13 @@ def render_proposal(result: AgentResult) -> None:
         st.button("Reject", key="reject", on_click=on_decline, args=("reject",))
         return
 
-    st.success("**Verified** by the deterministic checks")
-    st.caption(f"Confidence: {p.confidence:.0%} (model said {p.model_confidence:.2f}; retries: {p.retries})")
-
-    if not p.changes:
+    if not p.changes:  # nothing to verify or approve: just the explanation
         st.info("No changes proposed.")
         st.button("Dismiss", key="dismiss", on_click=on_decline, args=("dismiss",))
         return
+
+    st.success("**Verified** by the deterministic checks")
+    st.caption(f"Confidence: {p.confidence:.0%} (model said {p.model_confidence:.2f}; retries: {p.retries})")
 
     # Dry run on a deep copy: shows the result and catches a proposal that went stale.
     after_owner = copy.deepcopy(owner)
@@ -230,17 +277,19 @@ def render_proposal(result: AgentResult) -> None:
         return
 
     changed_ids = {c.task_id for c in p.changes}
-    before_col, after_col = st.columns(2)
-    for column, label, plan_owner in ((before_col, "Before", owner), (after_col, "After", after_owner)):
-        plan = Scheduler(plan_owner).build_daily_plan(p.day)
-        with column:
-            st.markdown(f"**{label}**")
-            rows = preview_rows(plan, changed_ids)
-            if rows:
-                st.table(rows)
-            else:
-                st.caption("No tasks this day.")
-            st.caption(f"{plan.minutes_used}/{plan_owner.available_minutes} min used")
+    for day in affected_days(p):  # the planning day, then e.g. tomorrow if a task moves there
+        st.markdown(f"##### {day.isoformat()}")
+        before_col, after_col = st.columns(2)
+        for column, label, plan_owner in ((before_col, "Before", owner), (after_col, "After", after_owner)):
+            plan = Scheduler(plan_owner).build_daily_plan(day)
+            with column:
+                st.markdown(f"**{label}**")
+                rows = preview_rows(plan, changed_ids)
+                if rows:
+                    st.table(rows)
+                else:
+                    st.caption("No tasks this day.")
+                st.caption(f"{plan.minutes_used}/{plan_owner.available_minutes} min used")
 
     approve_col, reject_col = st.columns(2)
     with approve_col:
@@ -253,10 +302,9 @@ def render_proposal(result: AgentResult) -> None:
 
 st.title("🐾 PawPal+")
 
-# One-shot message saved by a button or callback before its rerun.
-if "flash" in st.session_state:
-    level, text = st.session_state.pop("flash")
-    getattr(st, level)(text)
+dev_mode = st.sidebar.toggle("Developer mode", key="dev_mode", help="Show the agent trace (tool calls, verification).")
+
+show_toasts()  # queued by callbacks or before an st.rerun
 
 st.subheader("Owner settings")
 name_col, budget_col = st.columns(2)
@@ -285,11 +333,13 @@ with st.form("windows_form"):
         try:
             replace(owner, availability_windows=new_windows)  # throwaway copy: runs Owner validation
         except ValueError as err:
-            st.error(str(err))
+            report_error("windows", str(err))
         else:
             owner.availability_windows = new_windows
             save()
-            st.success("Availability saved: " + (", ".join(new_windows) or "all day"))
+            clear_error("windows")
+            notify("Availability saved: " + (", ".join(new_windows) or "all day"))
+show_error("windows")
 
 st.divider()
 
@@ -300,14 +350,17 @@ with st.form("add_pet_form", clear_on_submit=True):
     age = st.number_input("Age", min_value=0, max_value=50, value=1)
     if st.form_submit_button("Add pet"):
         if not pet_name.strip():
-            st.error("Pet name is required.")
+            report_error("pet", "Pet name is required.")
         else:
             try:
                 owner.add_pet(Pet(name=pet_name.strip(), species=species, age=int(age)))
-                save()
-                st.success(f"Added {pet_name.strip()}.")
             except ValueError as err:
-                st.error(str(err))
+                report_error("pet", str(err))
+            else:
+                save()
+                clear_error("pet")
+                notify(f"Added {pet_name.strip()}.")
+show_error("pet")
 
 st.subheader("Add a task")
 if not owner.pets:
@@ -315,7 +368,7 @@ if not owner.pets:
 else:
     with st.form("add_task_form", clear_on_submit=True):
         chosen_pet = st.selectbox("Pet", [p.name for p in owner.pets])
-        description = st.text_input("Task description", value="Morning walk")
+        description = st.text_input("Task description", placeholder="e.g. Morning walk", key="task_description")
         col1, col2 = st.columns(2)
         with col1:
             task_time = st.time_input("Time", value=None)
@@ -329,25 +382,27 @@ else:
         )
         if st.form_submit_button("Add task"):
             if not description.strip() or task_time is None:
-                st.error("Description and time are required.")
+                report_error("task", "Description and time are required.")
             else:
                 pet = owner.get_pet(chosen_pet)
                 try:
-                    pet.add_task(
-                        Task(
-                            description=description.strip(),
-                            time=task_time.strftime("%H:%M"),
-                            duration_minutes=int(duration),
-                            priority=priority,
-                            frequency=frequency,
-                            due_date=due,
-                            combinable=combinable,
-                        )
+                    task = Task(
+                        description=description.strip(),
+                        time=task_time.strftime("%H:%M"),
+                        duration_minutes=int(duration),
+                        priority=priority,
+                        frequency=frequency,
+                        due_date=due,
+                        combinable=combinable,
                     )
-                    save()
-                    st.success(f"Added task to {pet.name}.")
                 except ValueError as err:
-                    st.error(str(err))
+                    report_error("task", str(err))
+                else:
+                    pet.add_task(task)
+                    save()
+                    clear_error("task")
+                    notify(f"Added '{task.description}' to {pet.name}.")
+    show_error("task")
 
 st.divider()
 
@@ -375,11 +430,15 @@ if asked and llm_factory is not None:
                 request, owner, today, llm_factory(), day=agent_day, log_dir=st.session_state.log_dir
             )
     except llm_module.LLMError as err:  # messages are key-free by design
-        st.error(str(err))
+        report_error("agent", str(err))
+    else:
+        clear_error("agent")
+show_error("agent")
 
 if st.session_state.agent_result is not None:
     render_proposal(st.session_state.agent_result)
-    render_trace(st.session_state.agent_result)
+    if dev_mode:
+        render_trace(st.session_state.agent_result)
 
 st.divider()
 
@@ -405,13 +464,13 @@ else:
         next_task = scheduler.mark_task_complete(chosen_id, today=today)
         save()
         if next_task is not None:
-            flash("success", (
+            notify(
                 f"Completed. Next {next_task.frequency} occurrence of "
                 f"'{next_task.description}' ({next_task.pet_name}) added for {next_task.due_date.isoformat()}."
-            ))
+            )
         else:
-            flash("success", "Completed. No next occurrence (one-time task).")
-        st.rerun()  # rebuild the dropdown; the message is shown at the top of the next run
+            notify("Completed. No next occurrence (one-time task).")
+        st.rerun()  # rebuild the dropdown; the queued toast is shown on the next run
 
 st.subheader("Task list")
 if not owner.get_all_tasks():
@@ -452,10 +511,11 @@ if st.button("Generate schedule"):
 if st.session_state.get("show_plan"):
     plan = scheduler.build_daily_plan(plan_day)
 
-    for warning in plan.warnings:
-        if warning.endswith("(allowed by owner)"):
-            st.info(warning)
+    allowed = [w for w in plan.warnings if w.endswith("(allowed by owner)")]
+    for warning in allowed:
+        st.info(warning)
 
+    show_error("schedule")
     pairs = overlap_pairs(plan)
     for planned_task, skipped_task in pairs:
         st.warning(scheduler.detect_conflicts([planned_task, skipped_task])[0]
@@ -472,7 +532,7 @@ if st.session_state.get("show_plan"):
             args=(planned_task.task_id, skipped_task.task_id, plan.day),
         )
     if not pairs:
-        st.success("No overlaps")
+        st.success(f"No unresolved overlaps ({len(allowed)} allowed by you)" if allowed else "No overlaps")
 
     if plan.planned:
         st.table(task_rows(scheduler.sort_by_time(plan.planned), plan.reasons))
@@ -487,3 +547,5 @@ if st.session_state.get("show_plan"):
     with st.expander("Why this plan?"):
         for line in scheduler.explain_plan(plan):
             st.write(line)
+
+show_toasts()  # queued during this run (form submits)

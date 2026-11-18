@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from agent_fixtures import TODAY, final, make_world
+from agent_fixtures import TODAY, TOMORROW, final, make_world
 from streamlit.testing.v1 import AppTest
 
 import pawpal_agent.llm as llm_module
@@ -86,7 +86,6 @@ def test_proposal_renders_with_rationale_confidence_preview_and_trace(tmp_path):
     assert "Confidence:" in texts(at.caption)
     assert "**Before**" in texts(at.markdown) and "**After**" in texts(at.markdown)
     assert {"approve", "reject"} <= button_keys(at)
-    assert "propose_move_task" in texts(at.code)
 
 
 def test_approve_applies_saves_to_tmp_file_and_logs_decision(tmp_path):
@@ -98,7 +97,7 @@ def test_approve_applies_saves_to_tmp_file_and_logs_decision(tmp_path):
 
     saved = Owner.load_from_json(tmp_path / "data.json")
     assert saved.find_task(world.play.task_id)[1].time == "11:00"
-    assert "Approved and saved" in texts(at.success)
+    assert "Approved and saved" in texts(at.toast)
     assert at.session_state["agent_result"] is None
     decisions = [e for e in trace_events(tmp_path) if e["event"] == "human_decision"]
     assert len(decisions) == 1 and decisions[0]["decision"] == "approve" and decisions[0]["applied"] is True
@@ -166,7 +165,8 @@ def test_stale_approve_shows_error_and_applies_nothing(tmp_path):
     at.button(key="approve").click().run()
     assert not at.exception, at.exception
 
-    assert "out of date" in texts(at.error)
+    assert "out of date" in texts(at.error)  # inline, next to the agent panel
+    assert "out of date" in texts(at.toast)
     assert owner.find_task(world.play.task_id)[1].time == "10:00"
     decisions = [e for e in trace_events(tmp_path) if e["event"] == "human_decision"]
     assert decisions[0]["applied"] is False and decisions[0]["error"]
@@ -209,3 +209,92 @@ def test_windows_editor_validates_and_saves(tmp_path):
     at.text_input(key="windows_text").input("07:00-12:00, 16:00-22:00")
     at.button(key="save_windows").click().run()
     assert Owner.load_from_json(tmp_path / "data.json").availability_windows == ["07:00-12:00", "16:00-22:00"]
+
+
+# --- Phase 4 follow-up (Kyle's manual walkthrough) ---
+
+
+def test_trace_is_hidden_until_developer_mode_and_then_wraps(tmp_path):
+    world = make_world()
+    at = start_app(tmp_path, world.owner, lambda: FakeLLM(move_play_script(world)))
+    ask(at, "Move Play to 11:00")
+    assert "propose_move_task" not in texts(at.code)  # default off
+
+    at.sidebar.toggle(key="dev_mode").set_value(True).run()
+    assert not at.exception, at.exception
+    assert "propose_move_task" in texts(at.code)
+    assert at.code[0].proto.wrap_lines
+
+
+def test_preview_shows_every_day_the_proposal_touches(tmp_path):
+    world = make_world()
+    script = [
+        tool_reply(call("propose_move_task", task_id=world.play.task_id, new_time="10:00",
+                        new_date=TOMORROW.isoformat(), rationale="Tomorrow is quieter.")),
+        final("Moved Play to tomorrow.", 0.8),
+    ]
+    at = start_app(tmp_path, world.owner, lambda: FakeLLM(script))
+    ask(at, "Move Play to tomorrow")
+
+    headings = texts(at.markdown)
+    assert f"##### {TODAY.isoformat()}" in headings and f"##### {TOMORROW.isoformat()}" in headings
+    assert headings.index(TODAY.isoformat()) < headings.index(f"##### {TOMORROW.isoformat()}")  # planning day first
+
+
+def test_success_actions_use_toasts(tmp_path):
+    world = make_world()
+    at = start_app(tmp_path, world.owner, lambda: FakeLLM(move_play_script(world)))
+    ask(at, "Move Play to 11:00")
+    at.button(key="reject").click().run()
+    assert "Proposal rejected" in texts(at.toast)
+    assert not at.success or "Proposal rejected" not in texts(at.success)  # no top-of-page flash
+
+    at.text_input(key="windows_text").input("07:00-22:00")
+    at.button(key="save_windows").click().run()
+    assert "Availability saved" in texts(at.toast)
+
+
+def test_errors_toast_and_stay_inline_until_fixed(tmp_path):
+    world = make_world()
+    at = start_app(tmp_path, world.owner)
+    at.text_input(key="windows_text").input("9:00-12:00")
+    at.button(key="save_windows").click().run()
+    assert "Invalid window" in texts(at.toast) and "Invalid window" in texts(at.error)
+
+    at.run()  # an unrelated rerun keeps the inline error
+    assert "Invalid window" in texts(at.error)
+
+    at.text_input(key="windows_text").input("07:00-12:00")
+    at.button(key="save_windows").click().run()
+    assert "Invalid window" not in texts(at.error)
+
+
+def test_no_change_proposal_has_no_verified_badge_or_confidence(tmp_path):
+    world = make_world()
+    script = [final("Your day already has no conflicts, so nothing needs to change.", 0.9)]
+    at = start_app(tmp_path, world.owner, lambda: FakeLLM(script))
+    ask(at, "Is there anything to fix today?")
+
+    assert "nothing needs to change" in texts(at.markdown)
+    assert "Verified" not in texts(at.success)
+    assert "Confidence" not in texts(at.caption)
+    assert "dismiss" in button_keys(at) and "approve" not in button_keys(at)
+
+
+def test_allowed_overlaps_are_counted_in_the_schedule_message(tmp_path):
+    world = make_world()
+    bath = Task("Bath", "08:15", 30, "medium", due_date=TODAY)
+    world.mochi.add_task(bath)
+    at = start_app(tmp_path, world.owner)
+    at.button[[b.label for b in at.button].index("Generate schedule")].click().run()
+    at.button(key=f"do_both_{world.walk.task_id}_{bath.task_id}").click().run()
+
+    assert "No unresolved overlaps (1 allowed by you)" in texts(at.success)
+    assert "OK, both tasks" in texts(at.toast)
+
+
+def test_task_form_description_starts_empty_with_placeholder(tmp_path):
+    at = start_app(tmp_path, make_world().owner)
+    field = at.text_input(key="task_description")
+    assert field.value == ""
+    assert field.placeholder == "e.g. Morning walk"

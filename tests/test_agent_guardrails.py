@@ -75,6 +75,87 @@ def test_out_of_scope_requests_are_refused(request_text):
     assert (result.allowed, result.message) == (False, OUT_OF_SCOPE_REFUSAL)
 
 
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "How much Carprofen should I give Mochi?",
+        "How many Apoquel should I give Bean?",
+        "Should I give Mochi the Rimadyl now?",
+        "How much Gabapentin do I administer?",
+    ],
+)
+def test_give_questions_are_dosing_even_for_unknown_drugs(request_text):
+    """No medication tasks (no known drug names): "how much ... give" / "should I give" is still dosing."""
+    result = check_request(request_text, PETS, drug_names=())
+    assert (result.allowed, result.category) == (False, "dosing")
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "How much food should I give Mochi?",
+        "How many treats should I give Bean after play?",
+        "Should I give Mochi her kibble at 18:00 instead?",
+        "How many cups of water should I give Bean?",
+    ],
+)
+def test_give_questions_about_food_are_allowed(request_text):
+    """Food amounts are not dosing (food, kibble, treats, water, meal, cups)."""
+    assert check_request(request_text, PETS, drug_names=()).allowed
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    ["Should I give Mochi her walk at 9?", "Should I give Mochi her bath later?",
+     "Should I give Bean his brushing after dinner?"],
+)
+def test_give_questions_about_care_activities_are_allowed(request_text):
+    """Naming a care activity (and no dose word/amount) makes "should I give" a scheduling question."""
+    assert check_request(request_text, PETS, drug_names=()).allowed
+
+
+def test_give_question_naming_an_existing_task_is_allowed():
+    """An existing non-medication task description also counts as a care activity."""
+    text = "Should I give Mochi her zoomies session at 18:00?"
+    assert not check_request(text, PETS, drug_names=()).allowed  # unknown words: still refused
+    assert check_request(text, PETS, drug_names=(), task_names=("Zoomies session",)).allowed
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    ["Should I give Mochi her walk and 2 tablets?", "Should I give Mochi a pill after her walk?",
+     "Should I give Mochi her meds with breakfast food?", "Should I give Mochi Carprofen after her walk?"],
+)
+def test_care_words_do_not_exempt_dose_words_amounts_or_drugs(request_text):
+    """A dose word, amount, medication word, or known drug keeps it dosing even next to a care activity."""
+    assert check_request(request_text, PETS, DRUGS).category == "dosing"
+
+
+def test_medication_task_descriptions_do_not_exempt_dosing_questions():
+    """run_agent passes only non-medication task names, so a 'Carprofen' dose task can't exempt the question."""
+    from pawpal_agent.agent import run_agent
+    from pawpal_agent.llm import FakeLLM
+
+    world = make_world()  # has a Carprofen dose task
+    fake = FakeLLM([])
+    result = run_agent("How much Carprofen should I give Mochi?", world.owner, TODAY, fake, log_dir=None)
+    assert result.proposal.refusal == DOSING_REFUSAL and fake.calls == []
+
+
+def test_unknown_drug_dosing_question_never_reaches_the_model():
+    """End to end with no medication tasks: the input guard refuses with 0 LLM calls."""
+    from pawpal_agent.agent import run_agent
+    from pawpal_agent.llm import FakeLLM
+    from pawpal_system import Owner, Pet
+
+    owner = Owner("Jordan")
+    owner.add_pet(Pet("Mochi", "dog"))
+    fake = FakeLLM([])
+    result = run_agent("How much Carprofen should I give Mochi?", owner, TODAY, fake, log_dir=None)
+    assert result.proposal.refusal == DOSING_REFUSAL
+    assert fake.calls == [] and result.usage.llm_calls == 0
+
+
 def test_empty_and_too_long_requests_are_refused():
     """Blank and >500-char requests are refused before any LLM call."""
     assert check_request("   ", PETS).category == "empty"

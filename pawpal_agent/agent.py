@@ -28,6 +28,8 @@ How to work:
 - Use the read tools (list_tasks, find_conflicts, next_available_slot, build_daily_plan) to understand the day.
 - Record every change ONLY with propose_move_task, propose_add_task, or propose_complete_task, each with a one-sentence rationale.
 - Proposed changes apply to a sandbox copy, so later tool calls see them.
+- The verifier checks every day your changes touch (the original day and any new day), so never say another day \
+is unchecked or unverified.
 - Do not create overlaps, stay inside the owner's availability windows, and stay within the daily minute budget.
 - Medication doses (is_medication = true): you may only move them on the same day, within 60 minutes of their prescribed time.
 - Never give, calculate, convert, or adjust a medication dose, and never create medication tasks.
@@ -199,7 +201,9 @@ def run_agent(
     drug_names = tuple(sorted({t.medication.drug for t in owner.get_all_tasks() if t.medication}))
     trace.log("request", request=request, day=day.isoformat(), today=today.isoformat())
 
-    guard = check_request(request, tuple(p.name for p in owner.pets), drug_names)
+    # Medication task descriptions are excluded so a drug-named task can never exempt a dosing question.
+    task_names = tuple(sorted({t.description for t in owner.get_all_tasks() if t.medication is None}))
+    guard = check_request(request, tuple(p.name for p in owner.pets), drug_names, task_names)
     trace.log("guard", allowed=guard.allowed, category=guard.category)
     if not guard.allowed:
         proposal = Proposal(request, day, refusal=guard.message, verified=True, model_confidence=1.0, confidence=1.0)
