@@ -17,7 +17,7 @@ from typing import Callable
 
 from pawpal_agent.agent import AgentResult, apply_proposal, run_agent
 from pawpal_agent.llm import AnthropicClient, FakeLLM, LLMClient, LLMError, Step, call, text_reply, tool_reply
-from pawpal_agent.proposal import AddChange, CompleteChange, MoveChange, Proposal
+from pawpal_agent.proposal import Proposal, describe_change
 from pawpal_system import Medication, Owner, Pet, Scheduler, Task
 
 # Piped Windows output defaults to cp1252; keep the demo output safe to redirect.
@@ -139,21 +139,6 @@ class Output:
         """Write everything printed so far to path as UTF-8."""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
-
-
-def describe_change(change: object, owner: Owner) -> str:
-    """Return a one-line description of a proposed change using task names from the owner."""
-    if isinstance(change, AddChange):
-        return (f"ADD {change.description} ({change.pet_name}) on {change.due_date.isoformat()} at {change.time}, "
-                f"{change.duration_minutes} min, {change.priority}")
-    found = owner.find_task(change.task_id)
-    name = f"{found[1].description} ({found[1].pet_name}) at {found[1].time}" if found else change.task_id
-    if isinstance(change, MoveChange):
-        target = f"{change.new_date.isoformat()} " if change.new_date else ""
-        return f"MOVE {name} -> {target}{change.new_time}"
-    if isinstance(change, CompleteChange):
-        return f"COMPLETE {name}"
-    return repr(change)
 
 
 def print_plan(out: Output, owner: Owner, day: date) -> None:

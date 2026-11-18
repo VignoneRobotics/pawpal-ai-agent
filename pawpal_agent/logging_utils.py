@@ -14,9 +14,9 @@ MAX_RESULT_CHARS = 500
 class TraceLogger:
     """Append agent events to logs/agent_trace.jsonl and keep an in-memory copy for the caller."""
 
-    def __init__(self, log_dir: str | Path | None = "logs") -> None:
-        """Start a new trace; log_dir=None keeps events in memory only."""
-        self.request_id = uuid.uuid4().hex[:12]
+    def __init__(self, log_dir: str | Path | None = "logs", request_id: str | None = None) -> None:
+        """Start a trace (a new request_id unless one is given); log_dir=None keeps events in memory only."""
+        self.request_id = request_id or uuid.uuid4().hex[:12]
         self.events: list[dict] = []
         self.path = Path(log_dir) / TRACE_FILE if log_dir is not None else None
 

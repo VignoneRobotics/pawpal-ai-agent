@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import date
 
-from pawpal_system import Scheduler, Task
+from pawpal_system import Owner, Scheduler, Task
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,21 @@ def change_label(index: int, change: object) -> str:
     if isinstance(change, CHANGE_TYPES):
         return f"change {index} ({change_kind(change)} {change.task_id})"
     return f"change {index} ({type(change).__name__})"
+
+
+def describe_change(change: object, owner: Owner) -> str:
+    """Return a one-line description of a proposed change using task names from the owner."""
+    if isinstance(change, AddChange):
+        return (f"ADD {change.description} ({change.pet_name}) on {change.due_date.isoformat()} at {change.time}, "
+                f"{change.duration_minutes} min, {change.priority}")
+    found = owner.find_task(change.task_id)
+    name = f"{found[1].description} ({found[1].pet_name}) at {found[1].time}" if found else change.task_id
+    if isinstance(change, MoveChange):
+        target = f"{change.new_date.isoformat()} " if change.new_date else ""
+        return f"MOVE {name} -> {target}{change.new_time}"
+    if isinstance(change, CompleteChange):
+        return f"COMPLETE {name}"
+    return repr(change)
 
 
 def parse_change(data: dict) -> Change:
