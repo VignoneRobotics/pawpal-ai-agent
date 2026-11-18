@@ -1,0 +1,11 @@
+# PawPal+ theme: warm cream background, soft orange primary, teal links, rounded corners. Light mode by default.
+[theme]
+base = "light"
+primaryColor = "#D2691E"  # soft orange, dark enough for white button text
+backgroundColor = "#FFF8EE"
+secondaryBackgroundColor = "#F6E7D3"
+textColor = "#3D2C22"
+linkColor = "#2A9D8F"
+borderColor = "#EAD7BF"
+baseRadius = "large"
+font = "sans-serif"

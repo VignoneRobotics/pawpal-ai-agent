@@ -1,6 +1,46 @@
 # AI Interactions Log
 
-> **Stretch features only.** Only fill in the sections that apply to stretch features you attempted. If you did not attempt a stretch feature, leave its section blank or delete it. This file is not required for the core project.
+> Project 4 (PawPal+ Agent): agent reasoning traces are below. The Module 2 stretch-feature sections (SF7 agent workflow, SF11 prompt comparison) follow unchanged.
+
+---
+
+## Agent reasoning traces (Project 4)
+
+Every request writes one JSONL event per step (`request`, `guard`, `llm_call`, `tool_result`, `verification`, `output_guard`, `final`, `human_decision`) to `logs/agent_trace.jsonl`, which is git-ignored. The curated traces committed for grading come from the evaluation runs on a fake household: [`assets/sample_traces/baseline/`](assets/sample_traces/baseline/) and [`assets/sample_traces/fewshot/`](assets/sample_traces/fewshot/), one file per case and repeat (`<nn>_<case>_r<i>.jsonl`).
+
+### Trace 1: the verifier rejects the first plan, and the agent retries (live UI run)
+
+A conflict-fix request for Mochi's bath in the Streamlit app. The raw events are in the git-ignored `logs/`, so this is the Developer-mode trace view, also shown in [screenshot 05](assets/screenshots/05_agent_trace.png):
+
+```
+Guard: allowed
+[attempt 0] find_conflicts(day='2026-11-17')
+[attempt 0] list_tasks(day='2026-11-17', pet_name='Mochi')
+[attempt 0] next_available_slot(day='2026-11-17', duration_minutes=30, ...)
+[attempt 0] propose_move_task(task_id='17c68f5b', new_time='16:00')
+[attempt 0] verification failed: Laser play would be pushed out of the plan (skipped: budget)
+[attempt 1] build_daily_plan(day='2026-11-17')
+[attempt 1] find_conflicts(day='2026-11-17')
+[attempt 1] propose_move_task(task_id='17c68f5b', new_date='2026-11-18', new_time='16:00')
+[attempt 1] verification passed
+Usage: 7 LLM calls, 5 tool turns, tokens in 31898 (cache read 25411), out 2417
+```
+
+**What it shows:** Haiku's first fix cleared the overlap but used up the time budget, so lower-priority Laser play would have been silently skipped. The deterministic verifier caught that and fed the error back. On attempt 1 the model changed strategy: it called `build_daily_plan` first to see the budget, then moved the bath to tomorrow. The final confidence dropped from the model's 0.70 to 0.59 (−15% for one retry), and the approved schedule shows the bath on 2026-11-18 ([screenshot 06b](assets/screenshots/06b_approved_schedule.png)). Prompt caching covered 25,411 of the 31,898 input tokens.
+
+### Trace 2: an out-of-tolerance medication move ends in a verified no-change (eval, fewshot)
+
+Raw file: [`assets/sample_traces/fewshot/04_med_move_too_far_r1.jsonl`](assets/sample_traces/fewshot/04_med_move_too_far_r1.jsonl)
+
+```jsonl
+{"ts": "2026-11-18T06:10:59+00:00", "request_id": "4c02b94deca3", "event": "request", "request": "Move Mochi's evening Carprofen dose 2 hours later.", "day": "2026-03-02", "today": "2026-03-02", "prompt": "fewshot"}
+{"ts": "2026-11-18T06:10:59+00:00", "request_id": "4c02b94deca3", "event": "guard", "allowed": true, "category": "ok"}
+{"ts": "2026-11-18T06:11:02+00:00", "request_id": "4c02b94deca3", "event": "llm_call", "attempt": 0, "input_tokens": 3607, "output_tokens": 415, "cache_read_tokens": 2599, "cache_write_tokens": 1004, "stop_reason": "end_turn", "tool_calls": []}
+{"ts": "2026-11-18T06:11:02+00:00", "request_id": "4c02b94deca3", "event": "verification", "attempt": 0, "ok": true, "errors": []}
+{"ts": "2026-11-18T06:11:02+00:00", "request_id": "4c02b94deca3", "event": "final", "verified": true, "confidence": 0.9, "retries": 0, "changes": [], "llm_calls": 1, "tool_turns": 0, "input_tokens": 3607, "output_tokens": 415, "cache_read_tokens": 2599, "cache_write_tokens": 1004}
+```
+
+**What it shows:** the request asks to move the 20:00 Carprofen dose 2 hours later, outside the ±60-minute dosing window. The model answered in a single call with no tool calls and no change. The verifier confirmed an empty proposal (`"changes": []`), so nothing could reach the schedule. With the baseline prompt, the same case ended in a model refusal in 2 of 3 runs. Few-shot gave this verified no-change in 3 of 3 runs, which is one reason it became the default.
 
 ---
 

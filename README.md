@@ -1,194 +1,271 @@
-# 🐾 PawPal+
+# 🐾 PawPal+ Agent
 
-PawPal+ is a pet-care planner for a busy owner. You add your pets and their care tasks (walks, feeding, meds, grooming), and it builds a daily plan that fits your time budget, puts the most important tasks first, flags tasks that overlap, and explains why each task was planned or skipped. It is built as a Python logic layer (`pawpal_system.py`) with a CLI demo (`main.py`), a pytest suite, and a Streamlit UI (`app.py`).
+**Base project:** this extends my Module 2 project **PawPal+** (repo `ai110-module2show-pawpal-starter`), a deterministic pet-care scheduler. It let an owner add pets and care tasks, built a daily plan that fit a time budget by priority, flagged overlapping tasks, handled daily/weekly recurrence, saved to JSON, and had a Streamlit UI.
+
+**PawPal+ Agent** adds a natural-language scheduling assistant on top of that scheduler. You type something like *"Fix today's conflict between Mochi's bath and evening walk"*. Claude Haiku 5.5 plans a fix by calling the existing scheduler as tools on a sandbox copy, deterministic code verifies every proposed change, and nothing is saved until you approve it. The core idea: **the AI proposes, the scheduler verifies, the human decides.** Medication tasks get extra safety rules: the AI never gives dosing advice and can never change a dose.
 
 ## ✨ Features
 
-- **Multiple pets per owner**, each with its own task list; the scheduler always works across all pets.
-- **Tasks** with an `HH:MM` time, duration, priority (low/medium/high), frequency (once/daily/weekly) and due date, validated on creation (bad times, unknown values, zero durations and tasks that run past midnight are rejected).
-- **Daily plan within a time budget:** picks tasks by priority, skips any task that doesn't fit and keeps going, and explains every decision.
-- **Sorting** by time or by priority, and **filtering** by pet and by done/pending.
-- **Conflict warnings** for overlapping tasks (same pet or across pets), with a suggested free slot for each.
-- **Recurring tasks:** completing a daily or weekly task creates the next one; completing it late skips the missed dates and keeps the original schedule.
-- **Next free slot** finder for a task of any length.
-- **Saves your data** to `data.json`, so pets and tasks survive restarting the app.
-- **Formatted CLI output** with tables and status/priority markers.
+- **Chat-style requests** ("move", "add", "fix the conflict", "complete") turned into a structured **proposal**: each change comes with a one-line rationale, plus a confidence score.
+- **Deterministic verifier** checks every change: task validation, no new conflicts, time budget, availability windows, medication dosing interval (±60 min), unknown tasks/pets. On failure the errors go back to the model, which retries (max 2 retries).
+- **Human approval** with a before/after plan preview for every day the proposal touches. Approve, Reject, or Dismiss.
+- **Guardrails:** an input guard (out-of-scope requests and dosing questions are refused before any LLM call), an output guard (dosing text is redacted from the model's reply), and no contact/email/web tools.
+- **Medication form:** you re-type the dose and tick an attestation box, vet contact needs its own consent, and an optional **label photo cross-check** reads the label with Haiku vision and blocks the save on a mismatch. The photo is a check, never the source of the dose.
+- **Privacy:** prescription photos are never written to disk by default. The verification log stores a SHA-256 hash instead.
+- **Scheduler upgrades (from Phase 1):** overlap-aware daily plan (the lower-priority task is skipped with a reason, never silently dropped), "do both" overrides, combinable tasks, availability windows, overdue view, `move_task`.
+- **Traces + evaluation:** every request writes a JSONL trace (tool calls, verification, tokens, retries). `eval.py` runs 12 fixed cases against the real API.
 
-## 🚀 Getting started
+## 🧱 Architecture
 
-```bash
-python -m venv .venv
-source .venv/bin/activate      # Windows PowerShell: .\.venv\Scripts\Activate.ps1
+```mermaid
+flowchart TD
+    U(["Owner"]) --> UI["Streamlit app.py / CLI agent_demo.py"]
+
+    subgraph SCHED["Scheduling path: natural-language request"]
+        direction TB
+        IG{"Input guard<br/>check_request"}
+        REF["Scripted refusal<br/>out of scope or dosing question<br/>no LLM call"]
+        AG["Agent loop: Claude Haiku 5.5<br/>few-shot system prompt, cached<br/>max 6 tool turns per attempt"]
+        TL["Tools: ToolSession<br/>list_tasks, find_conflicts, next_available_slot,<br/>build_daily_plan, propose_move/add/complete<br/>run on a SANDBOX deep copy"]
+        SC["Scheduler + Owner<br/>pawpal_system.py, deterministic"]
+        PR["Proposal<br/>changes recorded from propose_* calls<br/>+ summary, confidence, notes"]
+        VF{"Deterministic verifier<br/>verify_proposal"}
+        OG["Output guard<br/>redact_dosing on summary and notes"]
+        PV["Before / after preview<br/>rationale + confidence"]
+        HA{"Owner: Approve or Reject"}
+        AP["apply_proposal<br/>re-verifies, only path that writes"]
+        DJ[("data.json")]
+
+        IG -- "refused" --> REF
+        IG -- "allowed" --> AG
+        AG <--> TL
+        TL <--> SC
+        AG --> PR --> VF
+        VF -- "fails: errors fed back, max 2 retries" --> AG
+        VF -- "passes, or no change" --> OG --> PV --> HA
+        HA -- "Approve" --> AP --> DJ
+        HA -- "Reject" --> DISC["Discarded, schedule unchanged"]
+    end
+
+    subgraph MED["Medication path: human form only, no agent tool"]
+        direction TB
+        MF["Medication form<br/>drug, dose text, prescribed times,<br/>optional vet contact"]
+        RT{"Owner re-types the dose<br/>+ attestation checkbox<br/>+ vet consent if contact given"}
+        PH["Optional label photo<br/>downscaled in memory, SHA-256 of original"]
+        VI["Claude Haiku 5.5 vision<br/>reads drug, dose, frequency, pet name"]
+        CMP{"compare_label<br/>owner values vs label"}
+        OK["Dose tasks added<br/>Label-verified badge"]
+        BLK["Blocked: nothing added<br/>mismatch or unreadable"]
+        VL[("logs/medication_verification.jsonl<br/>values, result, model id, consent, hash<br/>never the image")]
+
+        MF --> RT
+        RT -- "no photo" --> OK
+        RT -- "photo" --> PH --> VI --> CMP
+        CMP -- "match" --> OK
+        CMP -- "mismatch / unreadable / error" --> BLK
+        CMP --> VL
+    end
+
+    UI --> IG
+    UI --> MF
+    OK --> DJ
+    AG -. "trace events" .-> TR[("logs/agent_trace.jsonl")]
+    HA -. "human_decision" .-> TR
+
+    subgraph CHECKS["Where the AI is checked"]
+        direction LR
+        T1["pytest: 397 offline tests<br/>FakeLLM + FakeVisionClient, no key, no network"]
+        T2["eval.py: 12 fixed cases on the real API<br/>safety checks independent of the verifier"]
+    end
+    T1 -.-> VF
+    T1 -.-> IG
+    T1 -.-> CMP
+    T2 -.-> AG
+
+    classDef human fill:#FFE3C2,stroke:#E8833A,stroke-width:2px,color:#3D2C22
+    classDef ai fill:#D8F1EE,stroke:#2A9D8F,stroke-width:2px,color:#1F3B37
+    classDef check fill:#EDE7F6,stroke:#6A4C93,stroke-width:2px,color:#2E2240
+    classDef store fill:#F6E7D3,stroke:#8C6A4F,color:#3D2C22
+    class U,HA,RT,MF human
+    class AG,VI ai
+    class IG,VF,OG,CMP,T1,T2 check
+    class DJ,VL,TR store
+```
+
+**Legend:** orange = a human checks or decides; teal = the AI model; purple = deterministic checks and tests; tan = stored data. Source: [`diagrams/architecture.mmd`](diagrams/architecture.mmd). Class diagram: [`diagrams/uml.mmd`](diagrams/uml.mmd).
+
+**Data flow.** *Input:* the owner's request plus only the relevant day's tasks and pet names (no vet contact info). *Process:* guard → tool loop on a sandbox → proposal → verifier (retry with errors) → output guard. *Output:* a verified proposal that the owner approves or rejects. Only `apply_proposal` writes to `data.json`, and it verifies again first.
+
+| Module | Role |
+|---|---|
+| `pawpal_system.py` | Logic layer: `Task`, `Pet`, `Owner`, `Scheduler`, `DailyPlan`, `Medication`. No LLM code. |
+| `pawpal_agent/agent.py` | `run_agent` (plan → act → verify loop, retries) and `apply_proposal` |
+| `pawpal_agent/tools.py` | Tool JSON schemas + `ToolSession` (dispatch to `Scheduler` on a deep copy) |
+| `pawpal_agent/proposal.py` | Change types (`MoveChange`, `AddChange`, `CompleteChange`), `Proposal`, final-reply parsing |
+| `pawpal_agent/guardrails.py` | Input guard, output guard, verifier, confidence scoring |
+| `pawpal_agent/llm.py` | `LLMClient` protocol, `AnthropicClient` (real), `FakeLLM` (scripted, for tests) |
+| `pawpal_agent/prompts.py` | System prompt variants `fewshot` (default) and `baseline` |
+| `pawpal_agent/medication.py` | Medication form logic, label cross-check (vision), image hashing |
+| `pawpal_agent/logging_utils.py` | JSONL agent traces + medication verification log |
+| `app.py` / `agent_demo.py` / `eval.py` | Streamlit UI / CLI demo / evaluation harness |
+
+## 🚀 Setup
+
+Requires Python 3.14 (on Windows, `python` may not be on PATH, so use the `py` launcher).
+
+```powershell
+py -3.14 -m venv .venv
+.\.venv\Scripts\Activate.ps1          # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 
-python main.py                 # CLI demo
-python -m pytest               # run the tests
-streamlit run app.py           # the app
+copy .env.example .env                # macOS/Linux: cp .env.example .env
+# then edit .env and set ANTHROPIC_API_KEY=... (.env is git-ignored; the key is never printed or logged)
+
+streamlit run app.py                  # the app (the agent is disabled if no key is found)
+python agent_demo.py --mock           # CLI demo, offline with scripted responses
+python agent_demo.py                  # CLI demo with the real model (needs the key)
+python eval.py --mock                 # evaluation harness, offline
+python eval.py --repeat 3             # real evaluation (about $0.015 per run)
+python -m pytest                      # 397 tests, no network and no API key needed
 ```
 
-## 🧱 System design
+Optional settings in `.env`: `PAWPAL_MODEL` (default `claude-haiku-5-5`) and `PAWPAL_PROMPT` (`fewshot` by default, or `baseline`).
 
-The final class diagram is in [`diagrams/uml.mmd`](diagrams/uml.mmd).
+## 💬 Sample interactions
 
-- **Task** (dataclass): one care activity. Validates itself on creation, can mark itself complete, and creates its next occurrence if it repeats (`next_occurrence(today)`).
-- **Pet** (dataclass): a pet and its tasks. `add_task()` stamps each task with the pet's name.
-- **Owner** (dataclass): name, daily time budget (`available_minutes`) and pets. Rejects duplicate pet names, provides `get_all_tasks()` and `find_task()`, and saves/loads itself as JSON.
-- **Scheduler**: the "brain". It reads every task through `owner.get_all_tasks()`, so every feature covers all pets. It sorts, filters, finds conflicts and free slots, completes tasks, and builds and explains the daily plan.
+Real runs of `python agent_demo.py` (Claude Haiku 5.5, fake household, "today" fixed to 2026-03-02). Full output: [`assets/agent_demo_real.txt`](assets/agent_demo_real.txt).
 
-**Relationships:** an Owner has many Pets, each Pet has many Tasks, and the Scheduler uses the Owner.
+**1. Fixing a conflict**
 
-## 📐 Smarter Scheduling
+```
+Request: Fix today's conflict between Mochi's bath and evening walk.
+Guard: allowed
+Tool calls:
+  - find_conflicts(day='2026-03-02')
+  - next_available_slot(day='2026-03-02', duration_minutes=30, window_start='16:00', window_end='22:00')
+  - propose_move_task(task_id='abf9ce48', new_time='16:00')
+Proposal:
+  Summary: Proposed moving Mochi's bath from 17:00 to 16:00 so it no longer overlaps the 17:15
+           evening walk; the verifier reports no remaining conflicts. The change is pending owner approval.
+  Change: MOVE Bath (Mochi) at 17:00 -> 16:00
+    Rationale: Moving Mochi's bath to 16:00 clears the overlap with the 17:15 evening walk and fits
+               the open slot in the 16:00-22:00 window.
+  Verified: True | retries: 0 | confidence: 0.95
+Owner approves -> Moved Bath (Mochi) to 2026-03-02 16:00 | Plan 130/150 min used | Conflicts: none
+```
+
+**2. Moving a medication dose (allowed only within ±60 min of the prescribed time)**
+
+```
+Request: Move Mochi's evening Carprofen dose 30 minutes later.
+Guard: allowed
+Tool calls:
+  - propose_move_task(task_id='44ea011b', new_time='20:30')
+Proposal:
+  Change: MOVE Carprofen (Mochi) at 20:00 -> 20:30
+    Rationale: The owner asked for the evening Carprofen dose to be 30 minutes later; 20:30 is within
+               the 60-minute medication window on the same day and inside the 16:00-22:00 availability.
+  Note: The verifier reports an existing conflict on Mochi's schedule: Bath (17:00-17:30) overlaps
+        Evening walk (17:15-17:45). My change did not cause it, and I have not changed either task.
+  Verified: True | retries: 0 | confidence: 0.95
+Owner approves -> Moved Carprofen (Mochi) to 2026-03-02 20:30 (the dose text itself is read-only)
+```
+
+**3. A dosing question is refused before any model call**
+
+```
+Request: How much Carprofen should I give Mochi?
+Guard: REFUSED (dosing)
+Tool calls: none
+Proposal:
+  Refusal: I can't give dosing advice. Please follow your veterinarian's prescription or contact them directly.
+Usage: 0 LLM calls, 0 tool turns, tokens in 0, out 0
+Nothing to approve; schedule unchanged.
+```
+
+## 📸 Screenshots
+
+| | |
+|---|---|
+| ![Proposal preview](assets/screenshots/04_proposal_preview.png) | ![Approved schedule](assets/screenshots/06b_approved_schedule.png) |
+| **Proposal preview:** summary, rationale per change, the "Verified" badge, confidence, and the before/after plan with Approve / Reject. | **After approval:** the bath now sits on tomorrow (2026-11-18) in the task list, and today's schedule has no overlaps and a reason for every task. |
+| ![Agent trace](assets/screenshots/05_agent_trace.png) | ![Dosing refusal](assets/screenshots/08b_refused_dosing_rule_based.png) |
+| **Agent trace (Developer mode):** a live run where the verifier rejected the first fix ("Laser play would be pushed out of the plan") and Haiku retried successfully. | **Dosing question refused** by the rule-based input guard, with no model call. |
+| ![Label verified](assets/screenshots/12_med_label_verified.png) | ![Label mismatch](assets/screenshots/13_med_label_mismatch.png) |
+| **Medication form, label matches:** the dose tasks are saved with a "Label-verified" badge. | **Label mismatch:** the label says "50 mg (2 tablets)" but the owner typed "25 mg", so nothing is saved and the message says what differs. |
+
+More screenshots (do both, overdue view, honest no-change, rejection) are in [`assets/screenshots/`](assets/screenshots/).
+
+## 🧭 Design decisions and trade-offs
+
+- **Propose → verify → approve.** The model never touches real state. Tools run on a deep copy, and only `apply_proposal` (after the human clicks Approve) writes. It runs the verifier again first, so a stale proposal can't slip through.
+- **Changes come only from tool calls.** The proposal is built from the `propose_*` calls the model made, never from changes it restates in its final JSON. That way there is one source of truth for what gets verified and applied.
+- **The verifier holds all policy; tools only check structure.** Rules live in one deterministic, unit-tested place, so the same request can get different valid answers (bath at 16:00 or 17:45) and either one is trustworthy.
+- **The label photo is a cross-check, never the dose source.** A vision misread of "0.5 mg" as "5 mg" would be a 10× overdose if the photo filled in the dose. As a check, a misread just causes a mismatch and blocks the save (fails safe). PawPal+ also never multiplies strength × tablet count, because that would be calculating a dose.
+- **The photo is optional.** OTC medications and worn labels exist. Without a photo, the dose is still re-typed and attested.
+- **Verification log + SHA-256 instead of storing photos.** The log proves which image was checked without hoarding labels that show names, addresses and pharmacy details.
+- **Re-type the dose + attestation checkbox** instead of typing an approval phrase. Rote phrases get typed without being read. Re-typing forces the owner to look at the number.
+- **The agent never contacts anyone.** There are no email, phone or web tools, and there is no delete tool in v1.
+- **Claude Haiku 5.5** for cost (a full 12-case × 3-repeat eval costs about $0.015) and because paid API data isn't used for training. I rejected the Gemini free tier because its terms allow Google to use inputs, including human review, which conflicts with prescription data.
+- **Few-shot prompt as the default** (chosen from the eval below). Both prompts are constant strings, so the tools and system prompt are prompt-cached.
+- **Trade-offs I accepted:** the guards are keyword/regex based (cheap, testable, but they have known false positives and gaps). The daily plan is greedy, not optimal. Model confidence is self-reported and poorly calibrated, so it's shown with the retry count and the verifier result rather than trusted alone.
+
+## 🧪 Testing summary
+
+**Offline test suite:** `python -m pytest` runs **397 tests** with no network and no API key. Agent tests use `FakeLLM` and `FakeVisionClient` with scripted responses, and an autouse fixture fails any test that touches the real `data.json`.
+
+| Area | File | Tests |
+|---|---|---|
+| Scheduler logic (Module 2 + Phase 1) | `test_pawpal.py` | 133 |
+| Input/output guards, verifier | `test_agent_guardrails.py` | 88 |
+| Medication form, dose matching, label check | `test_medication.py` | 67 |
+| Eval harness + prompt variants | `test_eval.py` | 30 |
+| Streamlit UI (AppTest) | `test_app.py` | 25 |
+| Tools, loop, LLM client, apply | `test_agent_tools.py`, `test_agent_loop.py`, `test_anthropic_client.py`, `test_agent_llm.py`, `test_agent_apply.py` | 54 |
+
+**Evaluation (`eval.py`, real API, 12 cases, LLM-reached cases repeated 3×):** normal requests, conflict fix, a full day, a medication move inside and outside tolerance, out-of-scope, dosing questions (known and unknown drug), guard false-positive checks, and a prompt injection. The safety checks are written independently of the verifier: they compare a snapshot taken before the run with the verified proposal applied to a copy.
+
+| Prompt | Pass (runs) | Safety violations | Mean confidence | LLM calls | Output tokens | Est. cost |
+|---|---|---|---|---|---|---|
+| baseline | 27/27 | 0 | 0.89 | 50 | 18,134 | $0.0152 |
+| **fewshot** (default) | 27/27 | 0 | 0.91 | 49 | 15,661 (−14%) | $0.0141 |
+
+Few-shot gave the same answer in 3/3 runs on `conflict_fix` and `add_tomorrow` (baseline varied: bath 16:00 vs 17:45, grooming 07:00 vs 16:00). On `med_move_too_far` it returned a verified no-change in 3/3 runs, while baseline returned a model refusal in 2/3. **Limits:** there's a ceiling effect (no failures, so confidence calibration couldn't be measured), and the suite is small (12 cases, one household, 3 repeats). Full logs: [`assets/eval_baseline.txt`](assets/eval_baseline.txt), [`assets/eval_fewshot.txt`](assets/eval_fewshot.txt). Traces: [`assets/sample_traces/`](assets/sample_traces/).
+
+## 🪞 Reflection
+
+The most useful lesson was that the model didn't have to be trusted to be useful. Haiku sometimes proposed a fix that broke something else, and the deterministic verifier caught it and sent the errors back. In a live run, Haiku's first fix pushed another task out of the plan, and its retry moved the bath to the next day instead. Every safety gap I found came from testing real inputs, not from the design on paper: a dosing question that slipped past the input guard, an output guard that hid a valid answer, and a label check that ignored tablet counts. The full reflection (limitations, misuse, surprises, AI collaboration, evaluation) is in [`model_card.md`](model_card.md). Agent traces and AI-collaboration notes are in [`ai_interactions.md`](ai_interactions.md), and the Module 2 reflection is in [`reflection.md`](reflection.md).
+
+<details>
+<summary><strong>Base project: Module 2 PawPal+ scheduler (click to expand)</strong></summary>
+
+PawPal+ (Module 2) is the deterministic logic layer the agent calls as tools. It has a Python logic layer (`pawpal_system.py`), a CLI demo (`python main.py`), a pytest suite and a Streamlit UI.
 
 | Feature | Method(s) | Notes |
-|---------|-----------|-------|
-| Sorting by time | `Scheduler.sort_by_time` | Due date, then `HH:MM` time, priority, description. Zero-padded times sort correctly as text, and next-day copies sort after today's tasks. |
-| Sorting by priority | `Scheduler.sort_by_priority` | Within each day: priority first, then time. |
-| Filtering | `Scheduler.filter_tasks` | By `pet_name` (case-insensitive) and/or `completed`; `None` skips a filter. Composes with sorting: `sort_by_time(filter_tasks(pet_name="Mochi"))`. |
-| Conflict detection | `Scheduler.find_conflict_pairs`, `Scheduler.detect_conflicts` | Checks each pair once (`itertools.combinations`) for overlapping ranges on the same day (`a_start < b_end and b_start < a_end`), ignoring completed tasks. Back-to-back is not a conflict. Returns same-pet / cross-pet warnings and never raises. |
-| Recurring tasks | `Task.next_occurrence`, `Scheduler.mark_task_complete` | Completing a daily/weekly task keeps it as history and adds a copy with a new id on the same pet. If completed late, missed dates are skipped and the copy lands on the next scheduled date after today. "once", unknown ids and already-completed tasks return None. |
-| Next free slot | `Scheduler.next_available_slot` | Walks the gaps between the day's pending tasks (07:00-22:00 by default) and returns the first start time where the duration fits, or None. |
-| Daily plan | `Scheduler.build_daily_plan`, `Scheduler.explain_plan` | Tasks due that day and not completed, picked by priority then time; a task that doesn't fit the remaining budget is skipped and the plan continues. Overlaps are warnings only. `explain_plan` gives a reason for every planned and skipped task. |
+|---|---|---|
+| Sorting | `sort_by_time`, `sort_by_priority` | Date first, then time or priority, with a deterministic tie-break. |
+| Filtering | `filter_tasks` | By pet (case-insensitive) and/or completed status; composes with sorting. |
+| Conflicts | `find_conflict_pairs`, `detect_conflicts` | Same-day overlap `a_start < b_end and b_start < a_end`; back-to-back is fine; same-pet / cross-pet warnings, never raises. |
+| Recurrence | `Task.next_occurrence`, `mark_task_complete` | Daily/weekly copies; late completion skips missed dates and keeps the cadence. The logic layer never reads the clock. |
+| Next free slot | `next_available_slot` | First gap where a duration fits (now also respects availability windows). |
+| Daily plan | `build_daily_plan`, `explain_plan` | Greedy by priority within the time budget, skip and continue. Project 4 returns a `DailyPlan` with per-task reasons and skips the lower-priority task of an overlap. |
+| Persistence | `save_to_json`, `load_from_json` | Round trip via `Task(**d)`, so validation runs on load. |
 
-## 🖥️ Sample Output
+Module 2 stretch features: next available slot built in agent mode (SF1), JSON persistence (SF2), priority sorting (SF3), `tabulate` CLI formatting (SF4), and an Opus vs Sonnet prompt comparison (SF5). See [`ai_interactions.md`](ai_interactions.md).
 
-Excerpt of `python main.py` (one owner, two pets, nine tasks, 75-minute budget; the full output also shows every sorted and filtered view):
+Excerpt of `python main.py` today (75-minute budget; since Phase 1, the overlapping Training task is skipped with a reason instead of being planned with a warning):
 
 ```
-========================================================
-Today's Schedule - 2026-10-21
-Owner: Kyle | Pets: Mochi, Bean
-Time available: 75 min
-========================================================
-
-Planned (in time order):
-╭────────────┬────────┬───────┬──────────────────┬───────┬────────────┬────────────╮
-│ date       │ time   │ pet   │ task             │   min │ priority   │ status     │
-├────────────┼────────┼───────┼──────────────────┼───────┼────────────┼────────────┤
-│ 2026-10-21 │ 07:30  │ Mochi │ Morning walk     │    30 │ 🔴 high    │ ⏳ pending │
-├────────────┼────────┼───────┼──────────────────┼───────┼────────────┼────────────┤
-│ 2026-10-21 │ 08:00  │ Bean  │ Breakfast        │    15 │ 🔴 high    │ ⏳ pending │
-├────────────┼────────┼───────┼──────────────────┼───────┼────────────┼────────────┤
-│ 2026-10-21 │ 12:00  │ Bean  │ Clean litter box │    10 │ 🟡 medium  │ ⏳ pending │
-├────────────┼────────┼───────┼──────────────────┼───────┼────────────┼────────────┤
-│ 2026-10-21 │ 12:05  │ Mochi │ Training         │    20 │ 🟡 medium  │ ⏳ pending │
-╰────────────┴────────┴───────┴──────────────────┴───────┴────────────┴────────────╯
-
-Conflicts within the planned tasks:
-  ⚠️ Conflict (cross-pet: Bean, Mochi): Clean litter box 12:00-12:10 overlaps Training 12:05-12:25
-
-Skipped:
-╭────────────┬────────┬───────┬────────────────┬───────┬────────────┬────────────╮
-│ date       │ time   │ pet   │ task           │   min │ priority   │ status     │
-├────────────┼────────┼───────┼────────────────┼───────┼────────────┼────────────┤
-│ 2026-10-21 │ 17:00  │ Mochi │ Evening walk   │    25 │ 🟡 medium  │ ⏳ pending │
-├────────────┼────────┼───────┼────────────────┼───────┼────────────┼────────────┤
-│ 2026-10-21 │ 17:15  │ Mochi │ Bath           │    30 │ 🟡 medium  │ ⏳ pending │
-├────────────┼────────┼───────┼────────────────┼───────┼────────────┼────────────┤
-│ 2026-10-21 │ 19:00  │ Bean  │ Laser playtime │    40 │ 🟢 low     │ ⏳ pending │
-╰────────────┴────────┴───────┴────────────────┴───────┴────────────┴────────────╯
-
 Why:
   - Planned: Morning walk (Mochi) at 07:30, 30 min, high priority - fits in the 75-minute budget.
   - Planned: Breakfast (Bean) at 08:00, 15 min, high priority - fits in the 75-minute budget.
   - Planned: Clean litter box (Bean) at 12:00, 10 min, medium priority - fits in the 75-minute budget.
-  - Planned: Training (Mochi) at 12:05, 20 min, medium priority - fits in the 75-minute budget.
-  - Skipped: Evening walk (Mochi) at 17:00 needs 25 min; did not fit in the 75-minute budget (planned tasks use 75).
-  - Skipped: Bath (Mochi) at 17:15 needs 30 min; did not fit in the 75-minute budget (planned tasks use 75).
-  - Skipped: Laser playtime (Bean) at 19:00 needs 40 min; did not fit in the 75-minute budget (planned tasks use 75).
+  - Skipped: Training (Mochi) at 12:05 - overlaps Clean litter box, which was planned first.
+  - Skipped: Evening walk (Mochi) at 17:00 needs 25 min; did not fit in the 75-minute budget (planned tasks use 55).
+  - Skipped: Bath (Mochi) at 17:15 needs 30 min; did not fit in the 75-minute budget (planned tasks use 55).
+  - Skipped: Laser playtime (Bean) at 19:00 needs 40 min; did not fit in the 75-minute budget (planned tasks use 55).
 
-Planned 75 of 75 min.
-
-Next available slot (today, window 07:00-22:00):
-   30 min -> 07:00
-   45 min -> 08:15
-  240 min -> 12:25
-  300 min -> (none)
+Planned 55 of 75 min.
 ```
 
-## 🧪 Testing PawPal+
-
-```bash
-python -m pytest        # full suite
-python -m pytest -v     # one line per test
-```
-
-### What the tests cover
-
-All 81 tests live in `tests/test_pawpal.py`, use fixed dates with an explicit `due_date` (nothing depends on today's date), and are grouped like the file:
-
-- **Validation:** bad `HH:MM` times (such as `7:30` and `25:00`), unknown priority or frequency, duration of 0 or less, and tasks that run past midnight. A task ending exactly at 24:00 is allowed.
-- **Owner / Pet:** duplicate pet names rejected (case-insensitive), `get_pet`, `get_all_tasks` across pets, `remove_task`, `find_task`.
-- **Sorting:** chronological order, priority tie-break, next-day tasks after today's, an empty owner, sorting a filtered list, and priority-first sorting.
-- **Filtering:** by pet (case-insensitive), by completion status, and both combined.
-- **Recurrence:** daily (+1 day) and weekly (+7 days), "once" creates nothing, no duplicate on double completion, unknown ids, and late completion (skips missed dates, keeps the weekday, the "next date equals today" boundary).
-- **Conflicts:** exact warning text for same-pet and cross-pet overlaps, same start time, back-to-back tasks in both insertion orders, different days and completed tasks ignored, each pair reported once, and `find_conflict_pairs` ordering.
-- **Daily plan and `explain_plan`:** only pending tasks due that day, priority selection within the budget, an oversized task skipped while later ones still fit, exact-fit and zero budgets, overlapping tasks planned with a warning.
-- **Persistence:** a save/load round trip keeps pets, tasks, ids, dates and completed status; a missing file and invalid task data raise errors.
-- **Next free slot:** empty day, a gap between tasks, an exact back-to-back fit, no room, completed tasks and other days ignored, and the window end.
-
-**Mutation check:** temporarily changing `<` to `<=` in the overlap check left all tests passing, because the back-to-back test only added the earlier task first. I added `test_back_to_back_tasks_do_not_conflict_reverse_order`, confirmed it fails against the broken code, then restored the code.
-
-Sample test output (middle trimmed):
-
-```
-============================= test session starts ==============================
-collecting ... collected 81 items
-
-tests/test_pawpal.py::test_mark_complete_sets_completed_true PASSED      [  1%]
-tests/test_pawpal.py::test_add_task_increases_count_and_stamps_pet_name PASSED [  2%]
-tests/test_pawpal.py::test_task_rejects_bad_time[7:30] PASSED            [  3%]
-...
-tests/test_pawpal.py::test_next_slot_respects_window_end PASSED          [ 97%]
-tests/test_pawpal.py::test_next_slot_skips_past_task_that_starts_before_window PASSED [ 98%]
-tests/test_pawpal.py::test_next_slot_rejects_non_positive_duration PASSED [100%]
-
-============================== 81 passed ==============================
-```
-
-**Confidence Level:** ★★★★☆
-
-4/5: 81 tests cover the core behaviors and edge cases, and a deliberate mutation confirmed they catch real bugs; one star off because the Streamlit UI is only tested by hand and the daily plan is greedy rather than optimal.
-
-## 🌟 Stretch features
-
-### Agent mode (SF1): next available slot
-`Scheduler.next_available_slot(duration_minutes, day, window_start="07:00", window_end="22:00")` was built by Claude Code in agent (auto) mode across four files. The Streamlit app suggests a free slot under each conflict warning and has a "Find a free slot" tool. What the agent did, and what I had to correct, is in [`ai_interactions.md`](ai_interactions.md#agent-workflow-sf7).
-
-### Data persistence (SF2)
-`Owner.save_to_json(path)` and `Owner.load_from_json(path)` save the whole household (pets, tasks, ids, dates, completed status) using Python's built-in `json` and `dataclasses.asdict`, with dates stored as ISO strings. Loading rebuilds every task with `Task(**data)`, so the same validation runs and a bad file is rejected instead of loaded. The app loads `data.json` on startup and saves after every change; `data.json` is git-ignored. `main.py` shows a round trip with a temporary file:
-
-```
-Save/load round trip (temp file):
-  Saved 2 pets and 9 tasks to a temp file.
-  Loaded 2 pets and 9 tasks back.
-  Loaded owner equals original (ids, dates, completed): True
-```
-
-### Priority-based scheduling (SF3)
-`Scheduler.sort_by_priority(tasks)` sorts by priority first, then time, within each day (dates still come first, so next week's high-priority task never jumps ahead of today's). The daily plan also selects by priority. Example where the two orders differ:
-
-```
-sort_by_time:     ['07:00 Play fetch (low)', '08:00 Breakfast (medium)', '18:00 Heartworm pill (high)']
-sort_by_priority: ['18:00 Heartworm pill (high)', '08:00 Breakfast (medium)', '07:00 Play fetch (low)']
-```
-
-### Professional formatting (SF4)
-The CLI uses the [`tabulate`](https://pypi.org/project/tabulate/) library (`tabulate[widechars]`, which adds `wcwidth` so emoji columns line up). `format_tasks()` in `main.py` renders every task list with `tablefmt="rounded_grid"`, priorities as 🔴 high / 🟡 medium / 🟢 low, status as ✅ done / ⏳ pending, and `print_conflicts()` prefixes warnings with ⚠️. Emoji stay in the display layer only; `pawpal_system.py` produces plain ASCII text. `main.py` switches stdout to UTF-8 so the output doesn't crash when piped on Windows. The Streamlit app uses `st.table`, `st.success`, `st.warning` and `st.info` with the same markers.
-
-### Prompt / model comparison (SF5)
-I gave Claude Opus 5.5 and Claude Sonnet 5.5 the same prompt about late-completed recurring tasks and combined the best of both answers. The comparison table and decision are in [`ai_interactions.md`](ai_interactions.md#prompt-comparison-sf11).
-
-## 📸 Demo Walkthrough
-
-Run `streamlit run app.py`. A browser tab opens at `localhost:8501`.
-
-1. **Set up the owner.** At the top, type the owner's name (for example "Kyle") and set the daily time budget, for example 75 minutes. Changes are saved to `data.json` right away.
-2. **Add pets.** Under "Add a pet", add "Mochi" (dog) and "Bean" (cat). Adding "mochi" again shows a red error instead of crashing, because pet names must be unique.
-3. **Add tasks.** Under "Add a task", pick a pet and enter a description, time, duration, priority and frequency. Due dates default to today. For the demo, add a high-priority 07:30 walk for Mochi, a high-priority 08:00 breakfast for Bean, a daily 12:00 litter-box task for Bean, a 12:05 training session for Mochi (it overlaps the litter box), and a long low-priority 19:00 playtime. Entering 23:30 with a 45-minute duration shows an error, because tasks can't run past midnight.
-4. **Browse the task list.** The "Task list" table is always sorted by date and time. Use the Pet and Status dropdowns to show one pet's tasks or only pending/done tasks.
-5. **Complete a recurring task.** Under "Mark a task complete", pick the daily litter-box task and click "Mark complete". A green message confirms it and names tomorrow's new copy, which appears in the task list; the finished task stays listed as ✅ Done.
-6. **Find a free slot.** Under "Find a free slot", enter a duration (for example 45 minutes) to see the first gap in today's schedule where it fits.
-7. **Generate the schedule.** Click "Generate schedule". Conflict warnings appear first (Training overlaps the litter box, across two pets), each with a 💡 suggested free time for the later task. Below them is the plan in time order, a "Skipped tasks" table for anything that didn't fit the budget, and a "Why this plan?" expander that explains each decision.
-8. **Restart the app.** Stop it with Ctrl+C and run `streamlit run app.py` again. Your owner, pets and tasks are reloaded from `data.json`.
-
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or link to a demo video here -->
+</details>

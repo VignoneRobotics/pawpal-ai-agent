@@ -1,0 +1,75 @@
+flowchart TD
+    %% PawPal+ Agent architecture (Project 4). Matches app.py, agent_demo.py and pawpal_agent/.
+    %% Core idea: the AI proposes, the scheduler verifies, the human decides.
+
+    U(["Owner"]) --> UI["Streamlit app.py / CLI agent_demo.py"]
+
+    subgraph SCHED["Scheduling path: natural-language request"]
+        direction TB
+        IG{"Input guard<br/>check_request"}
+        REF["Scripted refusal<br/>out of scope or dosing question<br/>no LLM call"]
+        AG["Agent loop: Claude Haiku 5.5<br/>few-shot system prompt, cached<br/>max 6 tool turns per attempt"]
+        TL["Tools: ToolSession<br/>list_tasks, find_conflicts, next_available_slot,<br/>build_daily_plan, propose_move/add/complete<br/>run on a SANDBOX deep copy"]
+        SC["Scheduler + Owner<br/>pawpal_system.py, deterministic"]
+        PR["Proposal<br/>changes recorded from propose_* calls<br/>+ summary, confidence, notes"]
+        VF{"Deterministic verifier<br/>verify_proposal"}
+        OG["Output guard<br/>redact_dosing on summary and notes"]
+        PV["Before / after preview<br/>rationale + confidence"]
+        HA{"Owner: Approve or Reject"}
+        AP["apply_proposal<br/>re-verifies, only path that writes"]
+        DJ[("data.json")]
+
+        IG -- "refused" --> REF
+        IG -- "allowed" --> AG
+        AG <--> TL
+        TL <--> SC
+        AG --> PR --> VF
+        VF -- "fails: errors fed back, max 2 retries" --> AG
+        VF -- "passes, or no change" --> OG --> PV --> HA
+        HA -- "Approve" --> AP --> DJ
+        HA -- "Reject" --> DISC["Discarded, schedule unchanged"]
+    end
+
+    subgraph MED["Medication path: human form only, no agent tool"]
+        direction TB
+        MF["Medication form<br/>drug, dose text, prescribed times,<br/>optional vet contact"]
+        RT{"Owner re-types the dose<br/>+ attestation checkbox<br/>+ vet consent if contact given"}
+        PH["Optional label photo<br/>downscaled in memory, SHA-256 of original"]
+        VI["Claude Haiku 5.5 vision<br/>reads drug, dose, frequency, pet name"]
+        CMP{"compare_label<br/>owner values vs label"}
+        OK["Dose tasks added<br/>Label-verified badge"]
+        BLK["Blocked: nothing added<br/>mismatch or unreadable"]
+        VL[("logs/medication_verification.jsonl<br/>values, result, model id, consent, hash<br/>never the image")]
+
+        MF --> RT
+        RT -- "no photo" --> OK
+        RT -- "photo" --> PH --> VI --> CMP
+        CMP -- "match" --> OK
+        CMP -- "mismatch / unreadable / error" --> BLK
+        CMP --> VL
+    end
+
+    UI --> IG
+    UI --> MF
+    OK --> DJ
+    AG -. "trace events" .-> TR[("logs/agent_trace.jsonl")]
+    HA -. "human_decision" .-> TR
+
+    subgraph CHECKS["Where the AI is checked"]
+        direction LR
+        T1["pytest: 397 offline tests<br/>FakeLLM + FakeVisionClient, no key, no network"]
+        T2["eval.py: 12 fixed cases on the real API<br/>safety checks independent of the verifier"]
+    end
+    T1 -.-> VF
+    T1 -.-> IG
+    T1 -.-> CMP
+    T2 -.-> AG
+
+    classDef human fill:#FFE3C2,stroke:#E8833A,stroke-width:2px,color:#3D2C22
+    classDef ai fill:#D8F1EE,stroke:#2A9D8F,stroke-width:2px,color:#1F3B37
+    classDef check fill:#EDE7F6,stroke:#6A4C93,stroke-width:2px,color:#2E2240
+    classDef store fill:#F6E7D3,stroke:#8C6A4F,color:#3D2C22
+    class U,HA,RT,MF human
+    class AG,VI ai
+    class IG,VF,OG,CMP,T1,T2 check
+    class DJ,VL,TR store

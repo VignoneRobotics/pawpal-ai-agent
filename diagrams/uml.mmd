@@ -1,14 +1,22 @@
 classDiagram
-    %% PawPal+ UML (final). Matches pawpal_system.py.
+    %% PawPal+ Agent UML (Project 4, final). Matches pawpal_system.py and pawpal_agent/.
+    %% Key fields and public methods only; private helpers are omitted.
+
+    %% ---------- Logic layer: pawpal_system.py (deterministic, no LLM code) ----------
 
     class Owner {
         +str name
         +int available_minutes
         +list~Pet~ pets
+        +list~str~ availability_windows
+        +list~OverlapOverride~ overlap_overrides
+        +window_ranges() list~tuple~
         +add_pet(pet) None
         +get_pet(name) Pet
         +get_all_tasks() list~Task~
         +find_task(task_id) tuple
+        +allow_overlap(task_id_a, task_id_b, day) None
+        +is_overlap_allowed(task_id_a, task_id_b, day) bool
         +save_to_json(path) None
         +load_from_json(path)$ Owner
     }
@@ -33,8 +41,40 @@ classDiagram
         +str task_id
         +bool completed
         +str pet_name
+        +bool combinable
+        +Medication medication
+        +medication_dose(medication, time, duration_minutes, due_date)$ Task
         +mark_complete() None
         +next_occurrence(today) Task
+    }
+
+    class Medication {
+        <<frozen>>
+        +str drug
+        +str dose_text
+        +tuple times
+        +str vet_name
+        +str vet_clinic
+        +str vet_phone
+        +bool vet_consent
+        +bool attested
+        +bool label_verified
+    }
+
+    class OverlapOverride {
+        <<frozen>>
+        +str task_a
+        +str task_b
+        +date day
+    }
+
+    class DailyPlan {
+        +date day
+        +list~Task~ planned
+        +list~Task~ skipped
+        +dict reasons
+        +list~str~ warnings
+        +int minutes_used
     }
 
     class Scheduler {
@@ -45,11 +85,189 @@ classDiagram
         +find_conflict_pairs(tasks) list~tuple~
         +detect_conflicts(tasks) list~str~
         +next_available_slot(duration_minutes, day, window_start, window_end) str
+        +overdue_tasks(today, tasks) list~Task~
+        +move_task(task_id, new_time, new_date) Task
         +mark_task_complete(task_id, today) Task
-        +build_daily_plan(day) tuple
-        +explain_plan(planned, skipped) list~str~
+        +build_daily_plan(day) DailyPlan
+        +explain_plan(plan) list~str~
     }
 
     Owner "1" o-- "*" Pet : has
+    Owner "1" *-- "*" OverlapOverride : do-both choices
     Pet "1" *-- "*" Task : has
+    Task "*" --> "0..1" Medication : dose of
     Scheduler --> Owner : reads tasks via get_all_tasks()
+    Scheduler ..> DailyPlan : builds
+
+    %% ---------- Agent layer: pawpal_agent/ ----------
+
+    class LLMClient {
+        <<protocol>>
+        +complete(system, messages, tools) LLMResponse
+    }
+    class AnthropicClient {
+        +str model
+        +complete(system, messages, tools) LLMResponse
+    }
+    class FakeLLM {
+        +list~LLMResponse~ script
+        +list calls
+        +complete(system, messages, tools) LLMResponse
+    }
+    class LLMResponse {
+        <<frozen>>
+        +str text
+        +tuple tool_calls
+        +int input_tokens
+        +int output_tokens
+        +str stop_reason
+    }
+
+    class ToolSession {
+        +Owner sandbox
+        +Scheduler scheduler
+        +list changes
+        +reset() None
+        +dispatch(name, args) tuple
+    }
+
+    class Proposal {
+        +str request
+        +date day
+        +list changes
+        +str summary
+        +float confidence
+        +list~str~ notes
+        +str refusal
+        +bool verified
+        +list~str~ errors
+        +int retries
+    }
+    class MoveChange {
+        <<frozen>>
+        +str task_id
+        +str new_time
+        +date new_date
+        +str rationale
+    }
+    class AddChange {
+        <<frozen>>
+        +str pet_name
+        +str description
+        +str time
+        +int duration_minutes
+        +date due_date
+        +str rationale
+    }
+    class CompleteChange {
+        <<frozen>>
+        +str task_id
+        +str rationale
+    }
+
+    class AgentResult {
+        +Proposal proposal
+        +list trace
+        +Usage usage
+    }
+    class VerificationResult {
+        +bool ok
+        +list~str~ errors
+    }
+    class GuardResult {
+        <<frozen>>
+        +bool allowed
+        +str category
+        +str message
+    }
+    class TraceLogger {
+        +str request_id
+        +list events
+        +log(event, data) None
+    }
+
+    class agent_functions {
+        <<module>>
+        +run_agent(request, owner, today, llm, day, log_dir, prompt) AgentResult
+        +apply_proposal(owner, proposal, today) list~str~
+        +check_request(text, pet_names, drug_names, task_names) GuardResult
+        +verify_proposal(owner, proposal, today) VerificationResult
+        +redact_dosing(reply, drug_names, has_changes) tuple
+    }
+
+    LLMClient <|.. AnthropicClient
+    LLMClient <|.. FakeLLM
+    LLMClient ..> LLMResponse : returns
+    Proposal o-- MoveChange
+    Proposal o-- AddChange
+    Proposal o-- CompleteChange
+    AgentResult *-- Proposal
+    agent_functions ..> LLMClient : calls
+    agent_functions ..> ToolSession : tools on sandbox copy
+    agent_functions ..> GuardResult
+    agent_functions ..> VerificationResult
+    agent_functions ..> TraceLogger
+    ToolSession --> Scheduler : sandbox
+    agent_functions ..> Owner : apply_proposal writes after approval
+
+    %% ---------- Medication flow: pawpal_agent/medication.py ----------
+
+    class MedicationEntry {
+        <<frozen>>
+        +str pet_name
+        +str drug
+        +str dose_text
+        +str dose_retyped
+        +str times_text
+        +date start_date
+        +bool attested
+        +bool vet_consent
+    }
+    class VisionClient {
+        <<protocol>>
+        +str model
+        +read_label(jpeg) LabelReading
+    }
+    class AnthropicVisionClient {
+        +read_label(jpeg) LabelReading
+    }
+    class FakeVisionClient {
+        +read_label(jpeg) LabelReading
+    }
+    class LabelReading {
+        <<frozen>>
+        +str drug
+        +str dose_text
+        +str frequency
+        +str pet_name
+        +bool readable
+    }
+    class LabelCheck {
+        <<frozen>>
+        +str result
+        +tuple mismatches
+        +str image_sha256
+    }
+    class RegisterResult {
+        +list~Task~ tasks
+        +LabelCheck check
+        +list~str~ errors
+        +label_verified() bool
+    }
+    class medication_functions {
+        <<module>>
+        +register_medication(owner, entry, image, vision_client, log_dir, keep_label_copy) RegisterResult
+        +compare_label(entry, reading) LabelCheck
+        +dose_problems(owner_dose, label_dose) list~str~
+        +image_sha256(raw) str
+        +prepare_image(raw) bytes
+    }
+
+    VisionClient <|.. AnthropicVisionClient
+    VisionClient <|.. FakeVisionClient
+    VisionClient ..> LabelReading : returns
+    medication_functions ..> MedicationEntry : validates
+    medication_functions ..> VisionClient : optional cross-check
+    medication_functions ..> LabelCheck
+    medication_functions ..> RegisterResult
+    medication_functions ..> Task : medication_dose per prescribed time

@@ -21,7 +21,7 @@ MAX_VERIFIER_RETRIES = 2  # so at most 3 attempts
 FAILED_SUMMARY = "I couldn't find a schedule change that passes the safety checks. Nothing was changed."
 MODEL_REFUSAL = "The assistant declined this request. Nothing was changed."
 
-# Kept for existing imports; prompt variants live in prompts.py (each constant, so it can be prompt-cached).
+# Kept for existing imports (always the baseline text, not the default variant); variants live in prompts.py.
 SYSTEM_PROMPT = BASELINE_PROMPT
 
 
@@ -183,7 +183,7 @@ def run_agent(
 ) -> AgentResult:
     """Guard the request, run the tool loop on a sandbox, verify (with up to 2 retries), and return a Proposal.
 
-    prompt picks the system prompt variant ("baseline" or "fewshot"); None uses PAWPAL_PROMPT, else baseline.
+    prompt picks the system prompt variant ("baseline" or "fewshot"); None uses PAWPAL_PROMPT, else fewshot.
     """
     day = day or today
     prompt_name = resolve_prompt_name(prompt)

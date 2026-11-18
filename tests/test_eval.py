@@ -273,12 +273,12 @@ def test_repeat_must_be_positive():
 
 
 def test_prompt_selection_defaults_env_and_unknown(monkeypatch):
-    """Default is baseline; PAWPAL_PROMPT is honored; an explicit name wins; unknown names raise."""
+    """Default is fewshot; PAWPAL_PROMPT is honored; an explicit name wins; unknown names raise."""
     monkeypatch.delenv("PAWPAL_PROMPT", raising=False)
-    assert resolve_prompt_name() == "baseline" and get_system_prompt() == BASELINE_PROMPT
-    monkeypatch.setenv("PAWPAL_PROMPT", "fewshot")
-    assert get_system_prompt() == FEWSHOT_PROMPT
-    assert get_system_prompt("baseline") == BASELINE_PROMPT
+    assert resolve_prompt_name() == "fewshot" and get_system_prompt() == FEWSHOT_PROMPT
+    monkeypatch.setenv("PAWPAL_PROMPT", "baseline")
+    assert get_system_prompt() == BASELINE_PROMPT
+    assert get_system_prompt("fewshot") == FEWSHOT_PROMPT
     with pytest.raises(ValueError):
         get_system_prompt("zero-shot")
 
@@ -307,14 +307,14 @@ def test_run_agent_sends_the_chosen_prompt_on_every_call_including_retries(monke
     assert len(llm.calls) == 3 and all(c.system == FEWSHOT_PROMPT for c in llm.calls)
     default_llm = FakeLLM([text_reply(harness.final_json("Nothing to change.", 0.5))])
     run_agent("Plan today", harness.make_household().owner, harness.TODAY, default_llm, log_dir=None)
-    assert default_llm.calls[0].system == BASELINE_PROMPT
+    assert default_llm.calls[0].system == FEWSHOT_PROMPT  # the default variant
 
 
 def test_run_agent_env_prompt(monkeypatch):
-    """With no prompt argument, PAWPAL_PROMPT selects the variant."""
-    monkeypatch.setenv("PAWPAL_PROMPT", "fewshot")
+    """With no prompt argument, PAWPAL_PROMPT selects the variant (baseline here, since fewshot is the default)."""
+    monkeypatch.setenv("PAWPAL_PROMPT", "baseline")
     llm = FakeLLM([tool_reply(call("list_tasks", day=harness.TODAY.isoformat())),
                    text_reply(harness.final_json("Nothing to change.", 0.5))])
     result = run_agent("Plan today", harness.make_household().owner, harness.TODAY, llm, log_dir=None)
-    assert all(c.system == FEWSHOT_PROMPT for c in llm.calls)
-    assert result.trace[0]["prompt"] == "fewshot"
+    assert all(c.system == BASELINE_PROMPT for c in llm.calls)
+    assert result.trace[0]["prompt"] == "baseline"

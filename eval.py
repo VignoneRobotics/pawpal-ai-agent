@@ -2,7 +2,7 @@
 
     python eval.py                                  # real Claude (needs ANTHROPIC_API_KEY in .env)
     python eval.py --mock                           # offline: FakeLLM scripted responses, no key, no network
-    python eval.py --prompt fewshot                 # system prompt variant (default: PAWPAL_PROMPT, else baseline)
+    python eval.py --prompt fewshot                 # system prompt variant (default: PAWPAL_PROMPT, else fewshot)
     python eval.py --repeat 3                       # run each LLM-reached case 3 times (guard-only cases once)
     python eval.py --save PATH --trace-out DIR      # UTF-8 report file + one JSONL trace per run (fake data only)
 """
@@ -697,7 +697,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PawPal+ evaluation harness")
     parser.add_argument("--mock", action="store_true", help="use FakeLLM scripted responses (no key, no network)")
     parser.add_argument("--prompt", choices=["baseline", "fewshot"], default=None,
-                        help="system prompt variant (default: PAWPAL_PROMPT, else baseline)")
+                        help="system prompt variant (default: PAWPAL_PROMPT, else fewshot)")
     parser.add_argument("--repeat", type=_positive_int, default=1, metavar="N",
                         help="run each LLM-reached case N times (guard-only cases run once)")
     parser.add_argument("--save", type=Path, metavar="PATH", help="also write the report to PATH as UTF-8")

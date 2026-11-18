@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 
-DEFAULT_PROMPT = "baseline"
+DEFAULT_PROMPT = "fewshot"  # chosen from the Phase 6 eval (assets/eval_*.txt)
 
 BASELINE_PROMPT = """You are PawPal+, a pet-care scheduling assistant. You PROPOSE schedule changes; a deterministic \
 verifier checks them and the owner approves them. You never change the real schedule yourself.
@@ -61,7 +61,7 @@ PROMPTS: dict[str, str] = {"baseline": BASELINE_PROMPT, "fewshot": FEWSHOT_PROMP
 
 
 def resolve_prompt_name(name: str | None = None) -> str:
-    """Return the variant name: the argument, else PAWPAL_PROMPT, else "baseline"; raise ValueError if unknown."""
+    """Return the variant name: the argument, else PAWPAL_PROMPT, else "fewshot"; raise ValueError if unknown."""
     resolved = (name or os.environ.get("PAWPAL_PROMPT") or DEFAULT_PROMPT).strip().lower()
     if resolved not in PROMPTS:
         raise ValueError(f"Unknown prompt variant {resolved!r}: use one of {sorted(PROMPTS)}")
