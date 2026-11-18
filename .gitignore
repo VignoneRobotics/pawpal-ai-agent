@@ -7,3 +7,6 @@ __pycache__/
 data.json
 logs/
 .env
+
+# Opt-in local copies of prescription label photos (never committed)
+label_copies/

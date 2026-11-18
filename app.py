@@ -6,6 +6,7 @@ from pathlib import Path
 import streamlit as st
 
 from pawpal_agent import llm as llm_module
+from pawpal_agent import medication as med_module
 from pawpal_agent.agent import AgentResult, apply_proposal, run_agent
 from pawpal_agent.logging_utils import TraceLogger
 from pawpal_agent.proposal import Proposal, change_kind, describe_change
@@ -26,6 +27,12 @@ if "llm_factory" not in st.session_state:
     # Looked up via the module so tests can monkeypatch load_api_key; the key itself is never stored here.
     has_key = llm_module.load_api_key(APP_DIR / ".env") is not None
     st.session_state.llm_factory = llm_module.AnthropicClient if has_key else None
+if "vision_factory" not in st.session_state:
+    # Label cross-check client (FakeVisionClient factory in tests; None = photo check unavailable).
+    has_key = llm_module.load_api_key(APP_DIR / ".env") is not None
+    st.session_state.vision_factory = med_module.AnthropicVisionClient if has_key else None
+if "label_copy_dir" not in st.session_state:
+    st.session_state.label_copy_dir = str(APP_DIR / "label_copies")  # git-ignored, opt-in only
 if "agent_result" not in st.session_state:
     st.session_state.agent_result = None
 if "toasts" not in st.session_state:
@@ -109,6 +116,45 @@ def split_reason(reason: str) -> tuple[str, str]:
     return status, detail
 
 
+def medication_badge(task: Task) -> str:
+    """Return the medication badge for a task ("" for ordinary tasks)."""
+    if task.medication is None:
+        return ""
+    return "💊 Label-verified" if task.medication.label_verified else "💊 Not label-verified"
+
+
+MED_FORM_KEYS = (
+    "med_pet", "med_drug", "med_dose", "med_dose_retype", "med_times", "med_frequency", "med_priority",
+    "med_duration", "med_start", "med_vet_name", "med_vet_clinic", "med_vet_phone", "med_vet_consent",
+    "med_photo", "med_keep_copy", "med_attested",
+)
+
+
+def add_medication(entry: med_module.MedicationEntry, image: bytes | None, keep_copy: bool) -> bool:
+    """Human-only path: validate, optionally cross-check the label, add the dose tasks, and save; True on success."""
+    vision = None
+    if image is not None and st.session_state.vision_factory is not None:
+        try:
+            vision = st.session_state.vision_factory()
+        except llm_module.LLMError as err:  # messages are key-free by design
+            report_error("med", f"The label check is unavailable: {err}")
+            return False
+    result = med_module.register_medication(
+        owner, entry, image, vision, st.session_state.log_dir, keep_label_copy=keep_copy
+    )
+    if result.errors:
+        report_error("med", "\n\n".join(result.errors))
+        return False
+    save()
+    if keep_copy and image is not None and result.check is not None:
+        med_module.save_label_copy(image, result.check.image_sha256, st.session_state.label_copy_dir)
+    clear_error("med")
+    badge = "Label-verified" if result.label_verified else "not label-verified"
+    times = ", ".join(t.time for t in result.tasks)
+    notify(f"Added {len(result.tasks)} {entry.drug.strip()} dose(s) for {entry.pet_name} at {times} ({badge}).")
+    return True
+
+
 def task_rows(tasks: list[Task], reasons: dict[str, str] | None = None) -> list[dict]:
     """Return table rows (one dict per task) for st.table; adds a reason column when reasons are given."""
     rows = []
@@ -122,6 +168,7 @@ def task_rows(tasks: list[Task], reasons: dict[str, str] | None = None) -> list[
             "priority": t.priority,
             "frequency": t.frequency,
             "combinable": "yes" if t.combinable else "",
+            "medication": medication_badge(t),
             "status": "✅ Done" if t.completed else "⏳ Pending",
         }
         if reasons is not None:
@@ -403,6 +450,89 @@ else:
                     clear_error("task")
                     notify(f"Added '{task.description}' to {pet.name}.")
     show_error("task")
+
+st.subheader("💊 Add medication")
+st.caption(
+    "Medication doses are created only here, by you. The assistant can move a dose within 60 minutes of "
+    "its prescribed time, but it can never create a dose or change one."
+)
+if st.session_state.pop("med_reset", False):  # after a successful save: clear the form for the next entry
+    for key in MED_FORM_KEYS:
+        st.session_state.pop(key, None)
+if not owner.pets:
+    st.info("Add a pet first.")
+else:
+    with st.form("med_form"):  # values persist on error so the owner can fix them
+        med_pet = st.selectbox("Pet", [p.name for p in owner.pets], key="med_pet")
+        drug_col, times_col = st.columns(2)
+        with drug_col:
+            med_drug = st.text_input("Drug name", key="med_drug", placeholder="e.g. Fakeprofen")
+        with times_col:
+            med_times = st.text_input(
+                "Prescribed times", key="med_times", placeholder="08:00, 20:00",
+                help="The times on your vet's prescription (HH:MM, comma-separated). One dose task is created per time.",
+            )
+        dose_col, retype_col = st.columns(2)
+        with dose_col:
+            med_dose = st.text_input(
+                "Dose (as on the label)", key="med_dose", placeholder="e.g. 25 mg, 2 tablets",
+                help="Type the strength exactly as printed, plus the count if it is not 1 (e.g. \"25 mg, 2 tablets\").",
+            )
+        with retype_col:
+            med_retype = st.text_input("Re-type the dose", key="med_dose_retype",
+                                       help="Must match the dose exactly (case and spaces ignored).")
+        freq_col, prio_col, dur_col = st.columns(3)
+        with freq_col:
+            med_frequency = st.selectbox("Frequency", ["daily", "weekly", "once"], key="med_frequency")
+        with prio_col:
+            med_priority = st.selectbox("Priority", ["low", "medium", "high"], index=2, key="med_priority")
+        with dur_col:
+            med_duration = st.number_input("Minutes per dose", min_value=1, max_value=120, value=5, key="med_duration")
+        med_start = st.date_input("First dose date", value=today, key="med_start")
+
+        st.markdown("**Vet contact (optional)**")
+        vet_cols = st.columns(3)
+        with vet_cols[0]:
+            vet_name = st.text_input("Vet name", key="med_vet_name")
+        with vet_cols[1]:
+            vet_clinic = st.text_input("Clinic", key="med_vet_clinic")
+        with vet_cols[2]:
+            vet_phone = st.text_input("Phone", key="med_vet_phone")
+        vet_consent = st.checkbox(
+            "I consent to storing my vet's contact details in PawPal+ (they are never sent to the AI).",
+            key="med_vet_consent",
+        )
+
+        st.markdown("**Label photo (optional cross-check)**")
+        st.caption("The photo is only a check against what you typed; your typed dose is what gets saved. "
+                   "The photo is not stored unless you choose to keep a local copy.")
+        med_photo = st.file_uploader("Prescription label photo", type=["png", "jpg", "jpeg", "webp"], key="med_photo")
+        keep_copy = st.checkbox("Keep a local copy of the label photo on this computer", key="med_keep_copy")
+
+        attested = st.checkbox("This matches my veterinarian's prescription label.", key="med_attested")
+        med_submitted = st.form_submit_button("Add medication", key="add_med")
+    if med_submitted:
+        entry = med_module.MedicationEntry(
+            pet_name=med_pet,
+            drug=med_drug,
+            dose_text=med_dose,
+            dose_retyped=med_retype,
+            times_text=med_times,
+            start_date=med_start,
+            frequency=med_frequency,
+            priority=med_priority,
+            duration_minutes=int(med_duration),
+            attested=attested,
+            vet_name=vet_name,
+            vet_clinic=vet_clinic,
+            vet_phone=vet_phone,
+            vet_consent=vet_consent,
+        )
+        image = med_photo.getvalue() if med_photo is not None else None
+        if add_medication(entry, image, keep_copy):
+            st.session_state["med_reset"] = True
+            st.rerun()  # clears the form; the queued toast is shown on the next run
+    show_error("med")
 
 st.divider()
 

@@ -1,5 +1,6 @@
 """Streamlit AppTest smoke tests for the agent UI: FakeLLM only, tmp data file and logs, no network, no key."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from streamlit.testing.v1 import AppTest
 
 import pawpal_agent.llm as llm_module
 from pawpal_agent.llm import FakeLLM, call, tool_reply
+from pawpal_agent.medication import FakeVisionClient, LabelReading
 from pawpal_agent.tools import TOOL_SCHEMAS
 from pawpal_system import Owner, Task
 
@@ -26,7 +28,8 @@ def real_data_file_untouched():
     assert before == after, "a test touched the real data.json"
 
 
-def start_app(tmp_path: Path, owner: Owner, llm_factory=None, inject_factory: bool = True) -> AppTest:
+def start_app(tmp_path: Path, owner: Owner, llm_factory=None, inject_factory: bool = True,
+              vision_factory=None) -> AppTest:
     """Save owner to a tmp data file, point the app at it (plus tmp logs and a fixed today), and run once."""
     data_file = tmp_path / "data.json"
     owner.save_to_json(data_file)
@@ -34,8 +37,10 @@ def start_app(tmp_path: Path, owner: Owner, llm_factory=None, inject_factory: bo
     at.session_state["data_file"] = data_file
     at.session_state["log_dir"] = str(tmp_path / "logs")
     at.session_state["today"] = TODAY
+    at.session_state["label_copy_dir"] = str(tmp_path / "label_copies")
     if inject_factory:
         at.session_state["llm_factory"] = llm_factory
+        at.session_state["vision_factory"] = vision_factory
     at.run()
     assert not at.exception, at.exception
     return at
@@ -298,3 +303,93 @@ def test_task_form_description_starts_empty_with_placeholder(tmp_path):
     field = at.text_input(key="task_description")
     assert field.value == ""
     assert field.placeholder == "e.g. Morning walk"
+
+
+# --- Phase 5: medication form (human-only) ---
+
+SAMPLE_LABEL = ROOT / "assets" / "sample_label.png"
+MATCHING_READING = LabelReading("Fakeprofen chewable tablets", "25 mg (1 tablet)", "give twice daily", "Mochi", True)
+
+
+def fill_med_form(at: AppTest, dose: str = "25 mg", retype: str = "25 mg", attested: bool = True,
+                  vet_phone: str = "", photo: bytes | None = None, keep_copy: bool = False) -> AppTest:
+    """Fill the medication form for Mochi (Fakeprofen at 08:00 and 20:00) and submit it."""
+    at.selectbox(key="med_pet").select("Mochi")
+    at.text_input(key="med_drug").input("Fakeprofen")
+    at.text_input(key="med_dose").input(dose)
+    at.text_input(key="med_dose_retype").input(retype)
+    at.text_input(key="med_times").input("08:00, 20:00")
+    at.text_input(key="med_vet_phone").input(vet_phone)
+    at.checkbox(key="med_attested").set_value(attested)
+    at.checkbox(key="med_keep_copy").set_value(keep_copy)
+    if photo is not None:
+        at.file_uploader(key="med_photo").set_value(("label.png", photo, "image/png"))
+    at.button(key="add_med").click().run()
+    assert not at.exception, at.exception
+    return at
+
+
+def saved_med_tasks(tmp_path: Path) -> list[Task]:
+    """Return the Fakeprofen dose tasks in the tmp data file."""
+    owner = Owner.load_from_json(tmp_path / "data.json")
+    return [t for t in owner.get_all_tasks() if t.medication is not None and t.medication.drug == "Fakeprofen"]
+
+
+@pytest.mark.parametrize("kwargs, fragment", [
+    ({"retype": "50 mg"}, "re-typed dose does not match"),
+    ({"attested": False}, "prescription label"),
+    ({"vet_phone": "555-0100"}, "need your consent"),
+])
+def test_med_form_errors_show_inline_and_save_nothing(tmp_path, kwargs, fragment):
+    at = start_app(tmp_path, make_world().owner)
+    fill_med_form(at, **kwargs)
+    assert fragment in texts(at.error)
+    assert saved_med_tasks(tmp_path) == []
+    assert at.text_input(key="med_dose").value == "25 mg"  # kept so the owner can fix it
+
+
+def test_med_form_without_photo_saves_unverified_doses(tmp_path):
+    at = start_app(tmp_path, make_world().owner)
+    fill_med_form(at)
+    tasks = saved_med_tasks(tmp_path)
+    assert sorted(t.time for t in tasks) == ["08:00", "20:00"]
+    assert not any(t.medication.label_verified for t in tasks)
+    assert "not label-verified" in texts(at.toast)
+    assert at.text_input(key="med_drug").value == ""  # form cleared after saving
+    assert "💊 Not label-verified" in set(at.table[0].value["medication"])
+
+
+def test_med_form_label_match_saves_verified_and_logs_hash_only(tmp_path):
+    raw = SAMPLE_LABEL.read_bytes()
+    at = start_app(tmp_path, make_world().owner, vision_factory=lambda: FakeVisionClient(MATCHING_READING))
+    fill_med_form(at, photo=raw)
+    tasks = saved_med_tasks(tmp_path)
+    assert len(tasks) == 2 and all(t.medication.label_verified for t in tasks)
+    assert "Label-verified" in texts(at.toast)
+    log = (tmp_path / "logs" / "medication_verification.jsonl").read_text(encoding="utf-8")
+    assert json.loads(log)["image_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert not (tmp_path / "label_copies").exists()  # not opted in
+    assert "label.png" not in (tmp_path / "data.json").read_text(encoding="utf-8")
+
+
+def test_med_form_label_mismatch_saves_nothing(tmp_path):
+    reading = LabelReading("Fakeprofen", "50 mg (2 tablets)", "give twice daily", "Mochi", True)
+    at = start_app(tmp_path, make_world().owner, vision_factory=lambda: FakeVisionClient(reading))
+    fill_med_form(at, photo=SAMPLE_LABEL.read_bytes())
+    assert "does not match" in texts(at.error) and "remove the photo" in texts(at.error)
+    assert saved_med_tasks(tmp_path) == []
+
+
+def test_med_form_keep_copy_writes_one_file_after_save(tmp_path):
+    raw = SAMPLE_LABEL.read_bytes()
+    at = start_app(tmp_path, make_world().owner, vision_factory=lambda: FakeVisionClient(MATCHING_READING))
+    fill_med_form(at, photo=raw, keep_copy=True)
+    copies = list((tmp_path / "label_copies").iterdir())
+    assert len(copies) == 1 and copies[0].read_bytes() == raw
+
+
+def test_med_form_photo_without_key_saves_nothing(tmp_path):
+    at = start_app(tmp_path, make_world().owner, vision_factory=None)
+    fill_med_form(at, photo=SAMPLE_LABEL.read_bytes())
+    assert "ANTHROPIC_API_KEY" in texts(at.error)
+    assert saved_med_tasks(tmp_path) == []

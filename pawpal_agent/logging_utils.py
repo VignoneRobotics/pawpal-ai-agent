@@ -38,3 +38,17 @@ class TraceLogger:
 def truncate(text: str, limit: int = MAX_RESULT_CHARS) -> str:
     """Shorten long tool results for the log."""
     return text if len(text) <= limit else text[:limit] + "...(truncated)"
+
+
+MEDICATION_LOG_FILE = "medication_verification.jsonl"
+
+
+def log_medication_verification(log_dir: str | Path | None, record: dict) -> dict:
+    """Append one label-verification record (never image bytes) to logs/medication_verification.jsonl."""
+    record = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), **record}
+    if log_dir is not None:
+        path = Path(log_dir) / MEDICATION_LOG_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    return record
